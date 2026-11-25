@@ -341,8 +341,31 @@ export class CalloutWidget extends WidgetType {
   }
 }
 
+type Mermaid = typeof import("mermaid").default;
+let mermaidModule: Promise<Mermaid> | undefined;
+let mermaidTheme = "";
+let mermaidSeq = 0;
+
+/** Render Mermaid source to SVG. Mermaid is loaded on first use, so notes without diagrams never pay for it. */
+async function renderMermaid(code: string): Promise<string> {
+  const mermaid = await (mermaidModule ??= import("mermaid").then((m) => m.default));
+  const theme = document.documentElement.dataset.theme === "light" ? "default" : "dark";
+  if (theme !== mermaidTheme) {
+    mermaid.initialize({
+      startOnLoad: false,
+      securityLevel: "strict",
+      theme,
+      fontFamily: "inherit",
+      // Errors are shown by the widget; don't let Mermaid append its error SVG to <body>.
+      suppressErrorRendering: true,
+    });
+    mermaidTheme = theme;
+  }
+  const { svg } = await mermaid.render(`notium-mermaid-${++mermaidSeq}`, code);
+  return svg;
+}
+
 export class MermaidDiagramWidget extends WidgetType {
-  private mounted: { destroy(): void } | undefined;
   private destroyed = false;
 
   constructor(
@@ -363,33 +386,30 @@ export class MermaidDiagramWidget extends WidgetType {
     badge.textContent = "Diagrama Mermaid";
     container.appendChild(badge);
 
-    // Raw code until Pele (and the diagram type's module) has loaded.
+    // Raw code until Mermaid has loaded and rendered (and if the text is invalid).
     const holder = document.createElement("pre");
     holder.className = "cm-mermaid-fallback";
     holder.textContent = this.code;
     container.appendChild(holder);
 
-    // Pele is loaded on demand so notes without diagrams never pay for it.
-    void import("pele/lazy")
-      .then(async (pele) => {
-        let type = null;
-        try {
-          type = pele.detectType(this.code);
-        } catch {
-          // mount() shows what is wrong with the text.
-        }
-        await pele.load(type);
+    void renderMermaid(this.code)
+      .then((svg) => {
         if (this.destroyed) return;
         const diagram = document.createElement("div");
         diagram.className = "cm-mermaid-diagram";
+        // Sanitized by Mermaid itself (securityLevel "strict" runs DOMPurify).
+        diagram.innerHTML = svg;
         holder.replaceWith(diagram);
-        this.mounted = pele.mount(diagram, this.code, {
-          zoom: false,
-          onRender: () => view.requestMeasure(),
-          onError: () => view.requestMeasure(),
-        });
+        view.requestMeasure();
       })
-      .catch((e) => console.warn("Mermaid render failed", e));
+      .catch((e: unknown) => {
+        if (this.destroyed) return;
+        const error = document.createElement("div");
+        error.className = "cm-mermaid-error";
+        error.textContent = e instanceof Error ? e.message : String(e);
+        container.appendChild(error);
+        view.requestMeasure();
+      });
 
     container.addEventListener("mousedown", (e) => {
       e.preventDefault();
@@ -400,7 +420,6 @@ export class MermaidDiagramWidget extends WidgetType {
   }
   destroy(): void {
     this.destroyed = true;
-    this.mounted?.destroy();
   }
   ignoreEvent(): boolean {
     return false;

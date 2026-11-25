@@ -83,6 +83,9 @@ pub struct SyncCycleResult {
     pub ops_pulled: usize,
     pub conflicts: usize,
     pub blobs_synced: usize,
+    /// Notes edited outside the app that this cycle journaled (their rev moved).
+    #[serde(default)]
+    pub external_edits: usize,
 }
 
 // --- Wire protocol models ---
@@ -550,6 +553,55 @@ fn heal_tombstoned_deletes(h: &mut VaultHandle) -> Result<usize, CommandError> {
     Ok(healed)
 }
 
+/// Journal notes changed on disk outside the app (another editor, a script, a
+/// file-sync tool, edits made while the app was closed): their indexed hash
+/// differs from the last synced one, or sync has never seen them.
+fn journal_external_edits(h: &mut VaultHandle, device_id: &str) -> Result<usize, CommandError> {
+    // Cheap: unchanged files are not re-read (mtime cache in the index).
+    h.index.reconcile(&h.vault).map_err(sql_err)?;
+    let now = vault::now_secs();
+    let mut journaled = 0usize;
+    for rec in h.index.list_notes().map_err(sql_err)? {
+        if rec.tombstoned || h.sync.is_tombstoned(&rec.note_id).map_err(sql_err)? {
+            continue;
+        }
+        let current = h.sync.get_current(&rec.note_id).map_err(sql_err)?;
+        if current
+            .as_ref()
+            .is_some_and(|(_, hash)| *hash == rec.content_hash)
+        {
+            continue;
+        }
+        let bytes = h.vault.read(&rec.path)?;
+        // A file carrying another note's id (a conflict copy, a duplicated file)
+        // would spread the collision to every device: leave it local.
+        if vault::extract_embedded_id(&bytes, EditorKind::Markdown).as_deref()
+            != Some(rec.note_id.as_str())
+        {
+            continue;
+        }
+        let hlc = clock::Hlc { ts: now, cnt: 0 };
+        let (op, rev) = match current {
+            Some((rev, _)) => (
+                sync::local_update_op(device_id, &rec.note_id, rev, bytes.clone(), hlc, now),
+                rev + 1,
+            ),
+            None => {
+                let op = sync::local_create_op(device_id, &rec.note_id, bytes.clone(), hlc, now)
+                    .with_path(&rec.path);
+                h.sync.claim_path(&op).map_err(sql_err)?;
+                (op, 0)
+            }
+        };
+        h.sync
+            .set_current(&rec.note_id, rev, Some(&bytes))
+            .map_err(sql_err)?;
+        h.sync.append_journal(&op).map_err(sql_err)?;
+        journaled += 1;
+    }
+    Ok(journaled)
+}
+
 /// Folders ride the note journal as content-less ops on `folder:<path under
 /// notes/markdown>`, so empty folders reach other devices without a server change.
 pub const FOLDER_OP_PREFIX: &str = "folder:";
@@ -855,6 +907,7 @@ pub fn run_sync_cycle(
         ops_pulled: 0,
         conflicts: 0,
         blobs_synced: 0,
+        external_edits: 0,
     };
     if !config.enabled || config.server_url.trim().is_empty() {
         return Ok(report);
@@ -875,6 +928,7 @@ pub fn run_sync_cycle(
     // as deleted (e.g. deleted via a folder delete before that path journaled ops).
     let unpushed = with_vault(shared, root, |h| {
         heal_tombstoned_deletes(h)?;
+        report.external_edits = journal_external_edits(h, &config.device_id)?;
         journal_folder_changes(h, &config.device_id)?;
         h.sync.get_unpushed_ops().map_err(sql_err)
     })?;
@@ -1143,6 +1197,13 @@ impl SyncManager {
     }
 }
 
+/// Doubling retry delay after a failed cycle: 2 s, 4 s, 8 s, 16 s, then 30 s.
+fn next_retry(prev: Option<Duration>) -> Duration {
+    prev.map_or(Duration::from_secs(2), |d| {
+        (d * 2).min(Duration::from_secs(30))
+    })
+}
+
 fn sync_worker_loop(
     receiver: Receiver<SyncTrigger>,
     state: Arc<Mutex<InnerSyncState>>,
@@ -1150,8 +1211,28 @@ fn sync_worker_loop(
     app: AppHandle,
 ) {
     let mut last_run = Instant::now() - Duration::from_secs(120);
+    // After a failed cycle (often the network still waking up on app resume),
+    // retry soon instead of waiting for the next tick: 2 s, 4 s, ... up to 30 s.
+    let mut retry_in: Option<Duration> = None;
 
-    while let Ok(trigger) = receiver.recv() {
+    loop {
+        let trigger = match retry_in {
+            None => match receiver.recv() {
+                Ok(t) => t,
+                Err(_) => break,
+            },
+            Some(wait) => match receiver.recv_timeout(wait) {
+                Ok(t) => t,
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    if state.lock().map(|s| s.paused).unwrap_or(false) {
+                        retry_in = None;
+                        continue;
+                    }
+                    SyncTrigger::Immediate
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            },
+        };
         match trigger {
             SyncTrigger::Shutdown => break,
             SyncTrigger::Pause => {
@@ -1177,8 +1258,9 @@ fn sync_worker_loop(
                 if is_paused {
                     continue;
                 }
-                // Check if enough time elapsed since last sync cycle
-                if last_run.elapsed() < Duration::from_secs(15) {
+                // Ticks come every 15 s and `last_run` is set when a cycle ends,
+                // so a 15 s threshold skipped every other tick.
+                if last_run.elapsed() < Duration::from_secs(10) {
                     continue;
                 }
             }
@@ -1210,6 +1292,7 @@ fn sync_worker_loop(
 
         match result {
             Ok(report) => {
+                retry_in = None;
                 let now = vault::now_ts().parse::<u64>().unwrap_or(0);
                 if let Ok(mut st) = state.lock() {
                     st.state = "synced".to_string();
@@ -1220,8 +1303,14 @@ fn sync_worker_loop(
                 if report.ops_pulled > 0 || report.blobs_synced > 0 {
                     let _ = app.emit("vault://reconciled", ());
                 }
+                if report.external_edits > 0 {
+                    // The open note's rev may have moved: the editor re-reads it
+                    // (an empty path list means "any note may have changed").
+                    let _ = app.emit("vault-changed", Vec::<String>::new());
+                }
             }
             Err(e) => {
+                retry_in = Some(next_retry(retry_in));
                 let err_msg = e.to_string();
                 if let Ok(mut st) = state.lock() {
                     st.state = "error".to_string();
@@ -1709,6 +1798,67 @@ mod tests {
 
         // Idempotent: a second heal journals nothing new.
         assert_eq!(heal_tombstoned_deletes(&mut h).unwrap(), 0);
+    }
+
+    #[test]
+    fn failed_cycles_retry_with_capped_backoff() {
+        let secs: Vec<u64> =
+            std::iter::successors(Some(next_retry(None)), |d| Some(next_retry(Some(*d))))
+                .take(6)
+                .map(|d| d.as_secs())
+                .collect();
+        assert_eq!(secs, [2, 4, 8, 16, 30, 30]);
+    }
+
+    #[test]
+    fn external_edits_and_new_files_are_journaled_once() {
+        let (_d, mut h) = temp_vault();
+        let note = create_impl_for_test(&mut h, "Foo");
+        let before = h.sync.get_unpushed_ops().unwrap().len();
+        assert_eq!(journal_external_edits(&mut h, "dev_a").unwrap(), 0);
+
+        // Edited outside the app: one update op built on the synced rev.
+        let path = path_of(&h, &note);
+        let mut bytes = h.vault.read(&path).unwrap();
+        bytes.extend_from_slice(b"- [x] done\n");
+        std::fs::write(h.vault.root.join(&path), &bytes).unwrap();
+        let rev = h.sync.get_current(&note).unwrap().unwrap().0;
+        assert_eq!(journal_external_edits(&mut h, "dev_a").unwrap(), 1);
+        let ops = h.sync.get_unpushed_ops().unwrap();
+        let op = ops.last().unwrap();
+        assert_eq!(
+            (op.note_id.as_str(), op.kind, op.base_rev),
+            (note.as_str(), sync::OpKind::Update, rev)
+        );
+        assert_eq!(op.content.as_deref(), Some(&bytes[..]));
+        assert_eq!(h.sync.get_current(&note).unwrap().unwrap().0, rev + 1);
+
+        // A file dropped into the vault: a create op with its path.
+        h.vault
+            .write_atomic("notes/markdown/Bar.md", b"# Bar\n")
+            .unwrap();
+        assert_eq!(journal_external_edits(&mut h, "dev_a").unwrap(), 1);
+        let op = h.sync.get_unpushed_ops().unwrap().pop().unwrap();
+        assert_eq!(op.kind, sync::OpKind::Create);
+        assert_eq!(op.path.as_deref(), Some("notes/markdown/Bar.md"));
+
+        // A copy carrying Foo's id (conflict copy) stays local.
+        h.vault
+            .write_atomic("notes/markdown/Foo (conflict).md", &bytes)
+            .unwrap();
+        assert_eq!(journal_external_edits(&mut h, "dev_a").unwrap(), 0);
+
+        // Idempotent.
+        assert_eq!(journal_external_edits(&mut h, "dev_a").unwrap(), 0);
+        assert_eq!(h.sync.get_unpushed_ops().unwrap().len(), before + 2);
+    }
+
+    /// A note created through the app's create path (journaled + current set).
+    fn create_impl_for_test(h: &mut VaultHandle, title: &str) -> String {
+        crate::commands::create_impl(h, "markdown", Some(title), None)
+            .unwrap()
+            .note
+            .note_id
     }
 
     #[test]

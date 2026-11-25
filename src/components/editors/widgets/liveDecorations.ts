@@ -265,6 +265,9 @@ export function buildLiveDecorations(
       }
     } else if ((m = /^(\s*)- \[([ xX])\]\s+/.exec(text))) {
       occupy(0, m[0].length);
+      if (m[2] !== " " && start + m[0].length < line.to) {
+        decos.push(Decoration.mark({ class: "cm-strike" }).range(start + m[0].length, line.to));
+      }
       if (hidePrefix(m[0].length)) {
         const checkPos = start + m[1].length + 3;
         decos.push(

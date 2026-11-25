@@ -1,6 +1,6 @@
 [package]
 name = "notium"
-version = "0.1.0"
+version = "0.1.1"
 description = "Notium local-first Markdown note-taking app"
 authors = ["Notium"]
 edition = "2021"

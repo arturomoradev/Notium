@@ -1667,18 +1667,14 @@ textarea,
   margin-bottom: 8px;
 }
 
-/* Pele draws with these; they follow the app theme without re-rendering. */
 .cm-mermaid-widget {
-  --pele-bg: var(--panel);
-  --pele-fg: var(--text);
-  --pele-muted: var(--muted);
-  --pele-line: var(--muted);
-  --pele-surface: var(--panel-2);
-  --pele-surface-alt: var(--bg);
-  --pele-border: var(--border);
-  --pele-accent: var(--accent);
-  --pele-font-mono: var(--font-mono);
   overflow-x: auto;
+}
+.cm-mermaid-error {
+  margin-top: 6px;
+  color: var(--danger);
+  font-size: 12px;
+  white-space: pre-wrap;
 }
 
 .cm-mermaid-diagram svg {

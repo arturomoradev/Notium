@@ -1,6 +1,6 @@
 {
   "name": "notium",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Notium local-first Markdown note app",
   "type": "module",
   "scripts": {
@@ -35,7 +35,7 @@
     "@fontsource/cascadia-code": "^5.3.0",
     "@fontsource/poppins": "^5.3.0",
     "@tauri-apps/api": "2.12.4",
-    "pele": "^1.13.0",
+    "mermaid": "^12.3.0",
     "svelte": "5.57.2"
   },
   "devDependencies": {

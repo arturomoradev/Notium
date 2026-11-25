@@ -1435,7 +1435,7 @@ fn vault_info(h: &VaultHandle) -> Result<VaultInfoDto, CommandError> {
             }
         }
     }
-    let attachments = h.vault.scan_attachments()?.len();
+    let attachments = h.vault.scan_attachment_meta()?.len();
     let name = h
         .vault
         .root
@@ -1508,7 +1508,7 @@ fn list_impl(
     Ok(out)
 }
 
-fn create_impl(
+pub(crate) fn create_impl(
     h: &mut VaultHandle,
     kind: &str,
     title: Option<&str>,

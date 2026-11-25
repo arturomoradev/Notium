@@ -29,7 +29,8 @@ CREATE TABLE IF NOT EXISTS notes (
   tombstoned  INTEGER NOT NULL DEFAULT 0,
   quarantined INTEGER NOT NULL DEFAULT 0,
   dirty       INTEGER NOT NULL DEFAULT 1,
-  fts_rowid   INTEGER
+  fts_rowid   INTEGER,
+  mtime_ns    INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_notes_path ON notes(path);
 -- Uniqueness applies only to live notes so a tombstoned note keeps its real
@@ -66,7 +67,8 @@ CREATE TABLE IF NOT EXISTS attachments (
   path         TEXT NOT NULL,
   content_hash TEXT NOT NULL,
   file_size    INTEGER NOT NULL DEFAULT 0,
-  tombstoned   INTEGER NOT NULL DEFAULT 0
+  tombstoned   INTEGER NOT NULL DEFAULT 0,
+  mtime_ns     INTEGER
 );
 CREATE UNIQUE INDEX IF NOT EXISTS uq_attachments_live_path ON attachments(path) WHERE tombstoned = 0;
 
@@ -102,6 +104,36 @@ const SCHEMA_VERSION: i64 = 1;
 /// `notes/markdown/...` or `attachments/...` path, which holds because every
 /// real rel-path lives under one of those two roots.
 const RECONCILE_TMP_PREFIX: &str = "__reconcile__/";
+
+/// An mtime younger than this is not trusted: coarse timestamps (FUSE on
+/// Android, FAT, some network shares) could hide an edit made in the same tick.
+const MTIME_SETTLE_NS: i64 = 2_000_000_000;
+
+type MtimeCache = HashMap<String, (String, String, u64, i64)>;
+
+fn now_ns() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|d| i64::try_from(d.as_nanos()).ok())
+        .unwrap_or(i64::MAX)
+}
+
+/// The file's mtime if it is old enough to be relied on (future ones are not).
+fn trusted_mtime(meta: &vault::FileMeta, now: i64) -> Option<i64> {
+    meta.mtime_ns
+        .filter(|&t| now.saturating_sub(t) >= MTIME_SETTLE_NS)
+}
+
+/// `(id, content_hash)` of the live row for this file if size and mtime match.
+fn cache_hit(
+    cache: &MtimeCache,
+    meta: &vault::FileMeta,
+    mtime: Option<i64>,
+) -> Option<(String, String)> {
+    let (id, hash, size, cached_mtime) = cache.get(&meta.rel_path)?;
+    (mtime? == *cached_mtime && *size == meta.size).then(|| (id.clone(), hash.clone()))
+}
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct NoteRecord {
@@ -192,14 +224,26 @@ impl Index {
         let version: i64 = self
             .conn
             .pragma_query_value(None, "user_version", |r| r.get(0))?;
-        if version >= SCHEMA_VERSION {
-            return Ok(());
+        if version < SCHEMA_VERSION {
+            if Self::has_legacy_path_unique(&self.conn)? {
+                self.rebuild_path_constraints()?;
+            }
+            self.conn
+                .pragma_update(None, "user_version", SCHEMA_VERSION)?;
         }
-        if Self::has_legacy_path_unique(&self.conn)? {
-            self.rebuild_path_constraints()?;
+        // Idempotent: indexes created before the mtime cache get the column as
+        // NULL, which makes the next reconcile read every file once.
+        for table in ["notes", "attachments"] {
+            let has: i64 = self.conn.query_row(
+                "SELECT COUNT(*) FROM pragma_table_info(?1) WHERE name = 'mtime_ns'",
+                params![table],
+                |r| r.get(0),
+            )?;
+            if has == 0 {
+                self.conn
+                    .execute_batch(&format!("ALTER TABLE {table} ADD COLUMN mtime_ns INTEGER"))?;
+            }
         }
-        self.conn
-            .pragma_update(None, "user_version", SCHEMA_VERSION)?;
         Ok(())
     }
 
@@ -239,7 +283,8 @@ impl Index {
                tombstoned  INTEGER NOT NULL DEFAULT 0,
                quarantined INTEGER NOT NULL DEFAULT 0,
                dirty       INTEGER NOT NULL DEFAULT 1,
-               fts_rowid   INTEGER
+               fts_rowid   INTEGER,
+               mtime_ns    INTEGER
              );
              INSERT INTO notes_migrated
                (note_id, path, format, title, created_at, updated_at, content_hash,
@@ -257,7 +302,8 @@ impl Index {
                path         TEXT NOT NULL,
                content_hash TEXT NOT NULL,
                file_size    INTEGER NOT NULL DEFAULT 0,
-               tombstoned   INTEGER NOT NULL DEFAULT 0
+               tombstoned   INTEGER NOT NULL DEFAULT 0,
+               mtime_ns     INTEGER
              );
              INSERT INTO attachments_migrated
                (att_id, path, content_hash, file_size, tombstoned)
@@ -308,8 +354,52 @@ impl Index {
     }
 
     fn reconcile_inner(&mut self, vault: &LocalVault) -> rusqlite::Result<ReconcileReport> {
-        let notes = vault.scan_notes().map_err(rusqlite_err)?;
-        let attachments = vault.scan_attachments().map_err(rusqlite_err)?;
+        // Files whose live index row has the same path, size and (trusted)
+        // mtime are reused as-is: their content is not read or hashed again.
+        let scan_now = now_ns();
+        let note_cache = self.mtime_cache("note_id", "notes")?;
+        // (entry, trusted mtime, cached id)
+        let mut notes: Vec<(vault::NoteEntry, Option<i64>, Option<String>)> = Vec::new();
+        for (meta, editor) in vault.scan_note_meta().map_err(rusqlite_err)? {
+            let mtime = trusted_mtime(&meta, scan_now);
+            match cache_hit(&note_cache, &meta, mtime) {
+                Some((id, hash)) => notes.push((
+                    vault::NoteEntry {
+                        rel_path: meta.rel_path,
+                        editor,
+                        bytes: Vec::new(),
+                        hash,
+                        size: meta.size,
+                    },
+                    mtime,
+                    Some(id),
+                )),
+                None => notes.push((
+                    vault
+                        .read_note_entry(meta.rel_path, editor)
+                        .map_err(rusqlite_err)?,
+                    mtime,
+                    None,
+                )),
+            }
+        }
+        let att_cache = self.mtime_cache("att_id", "attachments")?;
+        let mut attachments: Vec<(vault::AttachmentEntry, Option<i64>)> = Vec::new();
+        for meta in vault.scan_attachment_meta().map_err(rusqlite_err)? {
+            let mtime = trusted_mtime(&meta, scan_now);
+            let entry = match cache_hit(&att_cache, &meta, mtime) {
+                Some((_, hash)) => vault::AttachmentEntry {
+                    rel_path: meta.rel_path,
+                    bytes: Vec::new(),
+                    hash,
+                    size: meta.size,
+                },
+                None => vault
+                    .read_attachment_entry(meta.rel_path)
+                    .map_err(rusqlite_err)?,
+            };
+            attachments.push((entry, mtime));
+        }
 
         // Existing index state
         let mut existing: HashMap<String, (String, String)> = HashMap::new(); // note_id -> (path, hash)
@@ -342,10 +432,16 @@ impl Index {
             ..Default::default()
         };
         let mut id_to_path: HashMap<String, String> = HashMap::new();
-        let mut assignments: Vec<(vault::NoteEntry, String, bool)> = Vec::new(); // (entry, id, had_embedded_id)
+        // (entry, id, had_embedded_id, mtime to store, cached id)
+        type Assignment = (vault::NoteEntry, String, bool, Option<i64>, Option<String>);
+        let mut assignments: Vec<Assignment> = Vec::new();
 
-        for entry in notes {
-            let embedded = vault::extract_embedded_id(&entry.bytes, entry.editor);
+        for (entry, mtime, cached) in notes {
+            // A cached file was last indexed clean: its embedded id is its row id.
+            let embedded = match &cached {
+                Some(id) => Some(id.clone()),
+                None => vault::extract_embedded_id(&entry.bytes, entry.editor),
+            };
             let mut id;
             let mut collision = false;
             match &embedded {
@@ -392,7 +488,10 @@ impl Index {
                 }
             }
             id_to_path.insert(id.clone(), entry.rel_path.clone());
-            assignments.push((entry, id, embedded.is_some()));
+            // Only a file indexed under its own embedded id may skip the read
+            // next time; anything else re-runs the full identity logic.
+            let store_mtime = mtime.filter(|_| embedded.as_deref() == Some(id.as_str()));
+            assignments.push((entry, id, embedded.is_some(), store_mtime, cached));
         }
 
         // Detach any live note whose path is about to change, so a later
@@ -428,7 +527,18 @@ impl Index {
 
         // Upsert pass (extract + write-back + DB writes)
         let mut processed: Vec<String> = Vec::new();
-        for (mut entry, id, had_embedded) in assignments {
+        for (mut entry, id, had_embedded, store_mtime, cached) in assignments {
+            if cached.as_deref() == Some(id.as_str()) {
+                // Unchanged file under its unchanged row: nothing to re-index.
+                report.updated += 1;
+                continue;
+            }
+            if cached.is_some() {
+                // Lost its id to a collision: needs its bytes after all.
+                entry = vault
+                    .read_note_entry(entry.rel_path, entry.editor)
+                    .map_err(rusqlite_err)?;
+            }
             // Inject identity if the file lacks one, and refresh the hash so the
             // index's content_hash always matches the bytes actually on disk.
             if !had_embedded {
@@ -461,18 +571,35 @@ impl Index {
                     )?;
                 }
             }
-            self.upsert_note(&id, &entry, &mut report)?;
+            // A rewritten (id-injected) file gets a new mtime; read it next time.
+            let store_mtime = if had_embedded { store_mtime } else { None };
+            self.upsert_note(&id, &entry, store_mtime, &mut report)?;
             processed.push(id);
         }
         let _ = processed;
 
         // Attachments
-        self.reconcile_attachments(&attachments)?;
+        self.reconcile_attachments_with_mtime(&attachments)?;
 
         // Two-pass link resolution
         self.resolve_all_links()?;
 
         Ok(report)
+    }
+
+    /// Live rows with a stored mtime: path -> (id, content_hash, file_size, mtime_ns).
+    fn mtime_cache(&self, id_col: &str, table: &str) -> rusqlite::Result<MtimeCache> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT path, {id_col}, content_hash, file_size, mtime_ns FROM {table}
+             WHERE tombstoned = 0 AND mtime_ns IS NOT NULL"
+        ))?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                (r.get(1)?, r.get(2)?, r.get::<_, i64>(3)? as u64, r.get(4)?),
+            ))
+        })?;
+        rows.collect()
     }
 
     fn lookup_alias(&self, rel_path: &str) -> Option<String> {
@@ -501,6 +628,7 @@ impl Index {
         &mut self,
         id: &str,
         entry: &vault::NoteEntry,
+        mtime_ns: Option<i64>,
         report: &mut ReconcileReport,
     ) -> rusqlite::Result<()> {
         let format = entry.editor.as_str();
@@ -521,13 +649,14 @@ impl Index {
         };
 
         self.conn.execute(
-            "INSERT INTO notes (note_id, path, format, title, created_at, updated_at, content_hash, file_size, tombstoned, quarantined, dirty)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,0,?9,0)
+            "INSERT INTO notes (note_id, path, format, title, created_at, updated_at, content_hash, file_size, tombstoned, quarantined, dirty, mtime_ns)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,0,?9,0,?10)
              ON CONFLICT(note_id) DO UPDATE SET
                path=excluded.path, format=excluded.format, title=excluded.title,
                created_at=excluded.created_at, updated_at=excluded.updated_at,
                content_hash=excluded.content_hash, file_size=excluded.file_size,
-               tombstoned=0, quarantined=excluded.quarantined, dirty=0",
+               tombstoned=0, quarantined=excluded.quarantined, dirty=0,
+               mtime_ns=excluded.mtime_ns",
             params![
                 id,
                 entry.rel_path,
@@ -538,6 +667,8 @@ impl Index {
                 entry.hash,
                 entry.size as i64,
                 doc.is_none() as i64,
+                // A quarantined note is re-read every time, as before.
+                mtime_ns.filter(|_| doc.is_some()),
             ],
         )?;
 
@@ -694,7 +825,7 @@ impl Index {
             size: bytes.len() as u64,
         };
         let mut report = ReconcileReport::default();
-        self.upsert_note(id, &entry, &mut report)?;
+        self.upsert_note(id, &entry, None, &mut report)?;
         self.resolve_all_links()?;
         Ok(())
     }
@@ -737,6 +868,14 @@ impl Index {
         &mut self,
         attachments: &[vault::AttachmentEntry],
     ) -> rusqlite::Result<()> {
+        let with_mtime: Vec<_> = attachments.iter().map(|a| (a.clone(), None)).collect();
+        self.reconcile_attachments_with_mtime(&with_mtime)
+    }
+
+    fn reconcile_attachments_with_mtime(
+        &mut self,
+        attachments: &[(vault::AttachmentEntry, Option<i64>)],
+    ) -> rusqlite::Result<()> {
         let mut hash_to_att: HashMap<String, String> = HashMap::new();
         let mut path_of_att: HashMap<String, String> = HashMap::new();
         {
@@ -760,7 +899,7 @@ impl Index {
         // Detach any existing attachment whose path is about to change, so a
         // later re-attach cannot collide with another attachment's still-unmoved
         // path (two-attachment swap).
-        for att in attachments {
+        for (att, _) in attachments {
             if let Some(aid) = hash_to_att.get(&att.hash) {
                 if path_of_att
                     .get(aid)
@@ -776,22 +915,22 @@ impl Index {
         }
 
         let mut seen: HashMap<String, String> = HashMap::new(); // path -> att_id
-        for att in attachments {
+        for (att, mtime) in attachments {
             let aid = match hash_to_att.get(&att.hash) {
                 Some(a) => {
                     // rename detection: same content, update path
                     self.conn.execute(
-                        "UPDATE attachments SET path = ?1, file_size = ?2 WHERE att_id = ?3",
-                        params![att.rel_path, att.size as i64, a],
+                        "UPDATE attachments SET path = ?1, file_size = ?2, mtime_ns = ?3 WHERE att_id = ?4",
+                        params![att.rel_path, att.size as i64, mtime, a],
                     )?;
                     a.clone()
                 }
                 None => {
                     let aid = clock::att_id();
                     self.conn.execute(
-                        "INSERT OR IGNORE INTO attachments (att_id, path, content_hash, file_size, tombstoned)
-                         VALUES (?1,?2,?3,?4,0)",
-                        params![aid, att.rel_path, att.hash, att.size as i64],
+                        "INSERT OR IGNORE INTO attachments (att_id, path, content_hash, file_size, tombstoned, mtime_ns)
+                         VALUES (?1,?2,?3,?4,0,?5)",
+                        params![aid, att.rel_path, att.hash, att.size as i64, mtime],
                     )?;
                     hash_to_att.insert(att.hash.clone(), aid.clone());
                     aid
@@ -1241,4 +1380,249 @@ fn sanitize_fts_query(raw: &str) -> String {
 
 fn rusqlite_err<E: std::fmt::Display>(e: E) -> rusqlite::Error {
     rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::other(e.to_string())))
+}
+
+#[cfg(test)]
+mod mtime_cache_tests {
+    use super::*;
+    use crate::vault::SCAN_READS;
+    use std::fs;
+    use std::time::{Duration, SystemTime};
+
+    /// Scan reads since the last call (thread-local, so parallel tests don't mix).
+    fn reads() -> usize {
+        SCAN_READS.with(|c| c.replace(0))
+    }
+
+    fn set_mtime(p: &Path, t: SystemTime) {
+        fs::File::options()
+            .write(true)
+            .open(p)
+            .unwrap()
+            .set_modified(t)
+            .unwrap();
+    }
+
+    fn mtime(p: &Path) -> SystemTime {
+        fs::metadata(p).unwrap().modified().unwrap()
+    }
+
+    /// Backdate every vault file so its mtime is past the settle window.
+    fn age_all(v: &LocalVault) {
+        let old = SystemTime::now() - Duration::from_secs(3600);
+        let mut stack = vec![v.root.join("notes/markdown"), v.root.join("attachments")];
+        while let Some(d) = stack.pop() {
+            for e in fs::read_dir(d).unwrap() {
+                let p = e.unwrap().path();
+                if p.is_dir() {
+                    stack.push(p);
+                } else {
+                    set_mtime(&p, old);
+                }
+            }
+        }
+    }
+
+    /// A vault with two notes and one attachment, indexed until warm.
+    fn warm() -> (tempfile::TempDir, LocalVault, Index) {
+        let dir = tempfile::tempdir().unwrap();
+        let v = LocalVault::new(dir.path());
+        v.init().unwrap();
+        v.write_atomic("notes/markdown/A.md", b"# A\n[[B]]\n")
+            .unwrap();
+        v.write_atomic("notes/markdown/B.md", b"# B\n#tag\n")
+            .unwrap();
+        v.write_atomic("attachments/x.bin", &[7u8; 4096]).unwrap();
+        let mut idx = Index::open_in_memory().unwrap();
+        idx.reconcile(&v).unwrap(); // injects ids (rewrites the notes)
+        age_all(&v);
+        idx.reconcile(&v).unwrap(); // reads everything once, stores mtimes
+        reads();
+        (dir, v, idx)
+    }
+
+    fn id_at(idx: &Index, table: &str, id_col: &str, path: &str) -> String {
+        idx.conn()
+            .query_row(
+                &format!("SELECT {id_col} FROM {table} WHERE path = ?1 AND tombstoned = 0"),
+                params![path],
+                |r| r.get(0),
+            )
+            .unwrap()
+    }
+
+    fn hash_at(idx: &Index, path: &str) -> String {
+        idx.conn()
+            .query_row(
+                "SELECT content_hash FROM notes WHERE path = ?1",
+                params![path],
+                |r| r.get(0),
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn unchanged_vault_reads_nothing_and_reports_the_same() {
+        let (_d, v, mut idx) = warm();
+        let first = format!("{:?}", idx.reconcile(&v).unwrap());
+        assert_eq!(reads(), 0);
+        let second = format!("{:?}", idx.reconcile(&v).unwrap());
+        assert_eq!(reads(), 0);
+        assert_eq!(first, second);
+        let b = id_at(&idx, "notes", "note_id", "notes/markdown/B.md");
+        assert_eq!(idx.tags_for(&b).unwrap(), vec!["tag"]);
+
+        // Same size and mtime but different bytes: trusted, so not re-read.
+        let p = v.root.join("notes/markdown/A.md");
+        let (t, before) = (mtime(&p), hash_at(&idx, "notes/markdown/A.md"));
+        let mut bytes = fs::read(&p).unwrap();
+        *bytes.last_mut().unwrap() = b'\t';
+        fs::write(&p, &bytes).unwrap();
+        set_mtime(&p, t);
+        idx.reconcile(&v).unwrap();
+        assert_eq!(reads(), 0);
+        assert_eq!(hash_at(&idx, "notes/markdown/A.md"), before);
+    }
+
+    #[test]
+    fn edited_note_is_reindexed() {
+        let (_d, v, mut idx) = warm();
+        let p = v.root.join("notes/markdown/B.md");
+        let before = hash_at(&idx, "notes/markdown/B.md");
+        let id = id_at(&idx, "notes", "note_id", "notes/markdown/B.md");
+        let mut bytes = fs::read(&p).unwrap();
+        bytes.extend_from_slice(b"\nmore #other\n");
+        fs::write(&p, &bytes).unwrap();
+        set_mtime(&p, SystemTime::now() - Duration::from_secs(60));
+        idx.reconcile(&v).unwrap();
+        assert_eq!(reads(), 1);
+        assert_ne!(hash_at(&idx, "notes/markdown/B.md"), before);
+        assert_eq!(id_at(&idx, "notes", "note_id", "notes/markdown/B.md"), id);
+        assert_eq!(idx.tags_for(&id).unwrap(), vec!["other", "tag"]);
+    }
+
+    #[test]
+    fn recently_modified_file_is_read_until_it_settles() {
+        let (_d, v, mut idx) = warm();
+        let p = v.root.join("notes/markdown/A.md");
+        set_mtime(&p, SystemTime::now());
+        idx.reconcile(&v).unwrap();
+        assert_eq!(reads(), 1);
+        idx.reconcile(&v).unwrap();
+        assert_eq!(
+            reads(),
+            1,
+            "an mtime inside the settle window is never trusted"
+        );
+        set_mtime(&p, SystemTime::now() - Duration::from_secs(60));
+        idx.reconcile(&v).unwrap();
+        assert_eq!(reads(), 1);
+        idx.reconcile(&v).unwrap();
+        assert_eq!(reads(), 0);
+    }
+
+    #[test]
+    fn moved_note_and_attachment_keep_identity() {
+        let (_d, v, mut idx) = warm();
+        let note = id_at(&idx, "notes", "note_id", "notes/markdown/A.md");
+        let att = id_at(&idx, "attachments", "att_id", "attachments/x.bin");
+        fs::create_dir_all(v.root.join("notes/markdown/sub")).unwrap();
+        fs::rename(
+            v.root.join("notes/markdown/A.md"),
+            v.root.join("notes/markdown/sub/A2.md"),
+        )
+        .unwrap();
+        fs::rename(
+            v.root.join("attachments/x.bin"),
+            v.root.join("attachments/y.bin"),
+        )
+        .unwrap();
+        let report = idx.reconcile(&v).unwrap();
+        assert_eq!(reads(), 2);
+        assert!(report.tombstones.is_empty());
+        assert_eq!(
+            id_at(&idx, "notes", "note_id", "notes/markdown/sub/A2.md"),
+            note
+        );
+        assert_eq!(
+            id_at(&idx, "attachments", "att_id", "attachments/y.bin"),
+            att
+        );
+        idx.reconcile(&v).unwrap();
+        assert_eq!(reads(), 0);
+    }
+
+    #[test]
+    fn deleted_note_is_tombstoned() {
+        let (_d, v, mut idx) = warm();
+        let id = id_at(&idx, "notes", "note_id", "notes/markdown/B.md");
+        fs::remove_file(v.root.join("notes/markdown/B.md")).unwrap();
+        let report = idx.reconcile(&v).unwrap();
+        assert_eq!(reads(), 0);
+        assert_eq!(report.tombstones, vec![id.clone()]);
+        assert!(idx.get_note(&id).unwrap().unwrap().tombstoned);
+    }
+
+    #[test]
+    fn index_without_mtime_column_migrates_and_reads_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let v = LocalVault::new(dir.path());
+        v.init().unwrap();
+        v.write_atomic("notes/markdown/A.md", b"# A\n").unwrap();
+        v.write_atomic("attachments/x.bin", b"x").unwrap();
+        let db = dir.path().join("old.db");
+        {
+            let mut idx = Index::open(&db).unwrap();
+            idx.reconcile(&v).unwrap();
+            idx.conn()
+                .execute_batch(
+                    "ALTER TABLE notes DROP COLUMN mtime_ns;
+                     ALTER TABLE attachments DROP COLUMN mtime_ns;",
+                )
+                .unwrap();
+        }
+        age_all(&v);
+        drop(Index::open(&db).unwrap());
+        let mut idx = Index::open(&db).unwrap(); // reopening is idempotent
+        reads();
+        idx.reconcile(&v).unwrap();
+        assert_eq!(reads(), 2);
+        idx.reconcile(&v).unwrap();
+        assert_eq!(reads(), 0);
+    }
+
+    /// `cargo test -p notium-core --release --lib reconcile_benchmark -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn reconcile_benchmark() {
+        let dir = tempfile::tempdir().unwrap();
+        let v = LocalVault::new(dir.path());
+        v.init().unwrap();
+        let filler = "lorem ipsum ".repeat(80);
+        for i in 0..2000 {
+            let body = format!(
+                "# Note {i}\n[[Note {}]] #t{}\n{filler}\n",
+                (i + 1) % 2000,
+                i % 50
+            );
+            v.write_atomic_bulk(&format!("notes/markdown/Note {i}.md"), body.as_bytes())
+                .unwrap();
+        }
+        for i in 0..40u8 {
+            v.write_atomic_bulk(&format!("attachments/photo{i}.jpg"), &vec![i; 4 << 20])
+                .unwrap();
+        }
+        let mut idx = Index::open(&dir.path().join("bench.db")).unwrap();
+        idx.reconcile(&v).unwrap();
+        age_all(&v);
+        let t = std::time::Instant::now();
+        idx.reconcile(&v).unwrap();
+        let full = t.elapsed();
+        reads();
+        let t = std::time::Instant::now();
+        idx.reconcile(&v).unwrap();
+        let cached = t.elapsed();
+        assert_eq!(reads(), 0);
+        println!("2000 notes + 160 MB attachments: full read {full:?}, mtime cache {cached:?}");
+    }
 }

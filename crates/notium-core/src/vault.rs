@@ -131,6 +131,35 @@ pub struct TrashEntry {
     pub size: u64,
 }
 
+/// Size and modification time of a vault file, gathered without reading it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FileMeta {
+    pub rel_path: String,
+    pub size: u64,
+    /// Nanoseconds since the Unix epoch; `None` when the platform cannot tell.
+    pub mtime_ns: Option<i64>,
+}
+
+fn file_meta(rel_path: String, abs: &Path) -> io::Result<FileMeta> {
+    let meta = fs::metadata(abs)?;
+    let mtime_ns = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .and_then(|d| i64::try_from(d.as_nanos()).ok());
+    Ok(FileMeta {
+        rel_path,
+        size: meta.len(),
+        mtime_ns,
+    })
+}
+
+#[cfg(test)]
+thread_local! {
+    /// File reads done by the scan helpers on this thread (tests count them).
+    pub(crate) static SCAN_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// A local filesystem vault.
 #[derive(Clone, Debug)]
 pub struct LocalVault {
@@ -383,45 +412,67 @@ impl LocalVault {
 
     /// List all `.md` notes.
     pub fn scan_notes(&self) -> io::Result<Vec<NoteEntry>> {
-        let mut out = Vec::new();
-        let abs = self.root.join(NOTES_MD);
-        for path in walk_files(&abs)? {
-            let rel = rel_path(&self.root, &path);
-            let editor = match crate::extract::editor_from_path(&rel) {
-                Some(e) => e,
-                None => continue,
-            };
-            let bytes = fs::read(&path)?;
-            let hash = hash::content_hash(&bytes);
-            let size = bytes.len() as u64;
-            out.push(NoteEntry {
-                rel_path: rel,
-                editor,
-                bytes,
-                hash,
-                size,
-            });
-        }
-        Ok(out)
+        self.scan_note_meta()?
+            .into_iter()
+            .map(|(m, editor)| self.read_note_entry(m.rel_path, editor))
+            .collect()
     }
 
     /// List all attachment files.
     pub fn scan_attachments(&self) -> io::Result<Vec<AttachmentEntry>> {
+        self.scan_attachment_meta()?
+            .into_iter()
+            .map(|m| self.read_attachment_entry(m.rel_path))
+            .collect()
+    }
+
+    /// Metadata-only scan of the notes (no file contents are read).
+    pub fn scan_note_meta(&self) -> io::Result<Vec<(FileMeta, EditorKind)>> {
         let mut out = Vec::new();
-        let abs = self.root.join(ATTACHMENTS);
-        for path in walk_files(&abs)? {
+        for path in walk_files(&self.root.join(NOTES_MD))? {
             let rel = rel_path(&self.root, &path);
-            let bytes = fs::read(&path)?;
-            let hash = hash::content_hash(&bytes);
-            let size = bytes.len() as u64;
-            out.push(AttachmentEntry {
-                rel_path: rel,
-                bytes,
-                hash,
-                size,
-            });
+            if let Some(editor) = crate::extract::editor_from_path(&rel) {
+                out.push((file_meta(rel, &path)?, editor));
+            }
         }
         Ok(out)
+    }
+
+    /// Metadata-only scan of the attachments (no file contents are read).
+    pub fn scan_attachment_meta(&self) -> io::Result<Vec<FileMeta>> {
+        walk_files(&self.root.join(ATTACHMENTS))?
+            .into_iter()
+            .map(|path| file_meta(rel_path(&self.root, &path), &path))
+            .collect()
+    }
+
+    /// Read and hash one note found by [`Self::scan_note_meta`].
+    pub fn read_note_entry(&self, rel_path: String, editor: EditorKind) -> io::Result<NoteEntry> {
+        let bytes = self.read_counted(&rel_path)?;
+        Ok(NoteEntry {
+            hash: hash::content_hash(&bytes),
+            size: bytes.len() as u64,
+            rel_path,
+            editor,
+            bytes,
+        })
+    }
+
+    /// Read and hash one attachment found by [`Self::scan_attachment_meta`].
+    pub fn read_attachment_entry(&self, rel_path: String) -> io::Result<AttachmentEntry> {
+        let bytes = self.read_counted(&rel_path)?;
+        Ok(AttachmentEntry {
+            hash: hash::content_hash(&bytes),
+            size: bytes.len() as u64,
+            rel_path,
+            bytes,
+        })
+    }
+
+    fn read_counted(&self, rel_path: &str) -> io::Result<Vec<u8>> {
+        #[cfg(test)]
+        SCAN_READS.with(|c| c.set(c.get() + 1));
+        fs::read(self.root.join(rel_path))
     }
 
     pub fn read_settings(&self) -> io::Result<VaultSettings> {
@@ -587,8 +638,7 @@ impl LocalVault {
         let bytes = match editor {
             EditorKind::Markdown => {
                 // No `# title` heading: the editor shows the file name as the title.
-                format!("---\nnotium_id: {id}\ncreated: {ts}\nupdated: {ts}\n---\n")
-                    .into_bytes()
+                format!("---\nnotium_id: {id}\ncreated: {ts}\nupdated: {ts}\n---\n").into_bytes()
             }
         };
         self.write_atomic(&rel, &bytes)?;
