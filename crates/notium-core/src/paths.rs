@@ -13,9 +13,23 @@ pub fn title_from_path(rel_path: &str) -> String {
     name
 }
 
+/// NFC form of `s`. macOS and iOS often name files in NFD ("e" + combining
+/// accent) while Windows, Android and the web use NFC; without one form the
+/// same note would have two paths. The web build normalizes in JS
+/// (`String.prototype.normalize`) before calling the WASM helpers.
+#[cfg(feature = "native")]
+pub fn nfc(s: &str) -> std::borrow::Cow<'_, str> {
+    icu_normalizer::ComposingNormalizerBorrowed::new_nfc().normalize(s)
+}
+
 /// Sanitize a note title into a cross-platform-safe filename (no reserved
-/// Windows characters, no control chars, no trailing dots/spaces).
+/// Windows characters, no control chars, no trailing dots/spaces; NFC in the
+/// native build).
 pub fn sanitize_title(title: &str) -> String {
+    #[cfg(feature = "native")]
+    let normalized = nfc(title);
+    #[cfg(feature = "native")]
+    let title: &str = &normalized;
     let s: String = title
         .chars()
         .filter(|c| {
@@ -83,6 +97,18 @@ mod tests {
         assert!(!is_safe_note_rel_path("notes/markdown/x.txt"));
         assert!(!is_safe_note_rel_path("notes/markdown/a:b.md"));
         assert!(!is_safe_note_rel_path("notes/markdown/a\\b.md"));
+    }
+
+    #[cfg(feature = "native")]
+    #[test]
+    fn titles_are_nfc() {
+        let nfd = "Cafe\u{301}";
+        assert_eq!(sanitize_title(nfd), "Caf\u{e9}");
+        assert_eq!(
+            sanitize_folder_path(&format!("{nfd}/x")).unwrap(),
+            "Caf\u{e9}/x"
+        );
+        assert!(!is_safe_note_rel_path(&format!("notes/markdown/{nfd}.md")));
     }
 
     #[test]

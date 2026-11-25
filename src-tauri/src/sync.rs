@@ -9,7 +9,6 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter};
 
-use notium_core::clock;
 use notium_core::extract::EditorKind;
 use notium_core::sync::{self, ApplyOutcome, Op};
 pub use notium_core::sync::{is_safe_attachment_rel_path, normalize_vault_id, MAX_D1_BLOB_BYTES};
@@ -35,6 +34,9 @@ pub struct SyncConfig {
     pub auto_sync: bool,
     #[serde(default = "default_interval")]
     pub interval_secs: u64,
+    /// Installation and folder the `device_id` belongs to (see `vault_binding`).
+    #[serde(default)]
+    pub bound_to: String,
 }
 
 fn default_vault_id() -> String {
@@ -54,11 +56,12 @@ impl Default for SyncConfig {
         SyncConfig {
             server_url: String::new(),
             auth_token: String::new(),
-            device_id: format!("dev_{}", &uuid::Uuid::now_v7().to_string()[..13]),
+            device_id: new_device_id(),
             vault_id: default_vault_id(),
             enabled: false,
             auto_sync: true,
             interval_secs: 20,
+            bound_to: String::new(),
         }
     }
 }
@@ -249,7 +252,8 @@ impl SyncClient {
         Ok(())
     }
 
-    pub fn pull_blob(&self, hash: &str) -> Result<Vec<u8>, String> {
+    /// Download a blob; `None` when the server no longer has it (404).
+    pub fn pull_blob(&self, hash: &str) -> Result<Option<Vec<u8>>, String> {
         let url = format!(
             "{}/sync/blob/{}?vault_id={}",
             self.server_url,
@@ -259,16 +263,18 @@ impl SyncClient {
         let req = self.agent.get(&url);
         let req = self.apply_auth(req);
 
-        let res = req
-            .call()
-            .map_err(|e| format_ureq_error("GET /sync/blob", e))?;
+        let res = match req.call() {
+            Ok(res) => res,
+            Err(ureq::Error::Status(404, _)) => return Ok(None),
+            Err(e) => return Err(format_ureq_error("GET /sync/blob", e)),
+        };
 
         let mut bytes = Vec::new();
         use std::io::Read;
         res.into_reader()
             .read_to_end(&mut bytes)
             .map_err(|e| format!("Error leyendo bytes de adjunto: {e}"))?;
-        Ok(bytes)
+        Ok(Some(bytes))
     }
 }
 
@@ -403,22 +409,70 @@ fn write_config_file(
     Ok(())
 }
 
+/// A new device id. The random tail of a UUIDv7 (its head is only the creation
+/// time, which two devices set up together could share).
+fn new_device_id() -> String {
+    format!("dev_{}", &uuid::Uuid::now_v7().simple().to_string()[20..])
+}
+
+/// Id of this app installation (a file in the app data folder), set at startup.
+static INSTALL_ID: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// Load (or create) this installation's id from `app_data`.
+pub fn init_install_id(app_data: &Path) {
+    let file = app_data.join("install_id");
+    let id = fs::read_to_string(&file)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| {
+            let id = uuid::Uuid::now_v7().simple().to_string();
+            let _ = fs::create_dir_all(app_data);
+            let _ = fs::write(&file, &id);
+            id
+        });
+    let _ = INSTALL_ID.set(id);
+}
+
+/// Which copy of a vault a device id belongs to: this installation and this
+/// folder. A vault folder copied to another computer or place gets a new
+/// device id; with the old one, each copy would skip the other's ops as its own.
+fn vault_binding(vault_root: &Path) -> String {
+    let install = INSTALL_ID.get().map_or("", String::as_str);
+    let root = vault_root.to_string_lossy();
+    let root = root.trim_end_matches(['/', '\\']).to_lowercase();
+    notium_core::hash::content_hash(format!("{install}/{root}").as_bytes())[..16].to_string()
+}
+
 /// Read sync configuration from `<vault>/.app/sync_config.json`, resolving the
 /// auth token from the OS credential store. A plaintext token left in the file
 /// by an older version is migrated to the credential store on first load.
 pub fn load_sync_config(vault_root: &Path) -> SyncConfig {
     let p = vault_root.join(".app").join("sync_config.json");
+    let binding = vault_binding(vault_root);
     if let Ok(bytes) = fs::read(&p) {
         if let Ok(mut cfg) = serde_json::from_slice::<SyncConfig>(&bytes) {
-            if cfg.auth_token.is_empty() {
+            let plaintext = !cfg.auth_token.is_empty();
+            if !plaintext {
                 cfg.auth_token = fetch_token(&cfg.device_id);
-            } else if store_token(&cfg.device_id, &cfg.auth_token) {
+            }
+            if cfg.bound_to != binding {
+                // Configs from before the binding keep their id.
+                if !cfg.bound_to.is_empty() {
+                    cfg.device_id = new_device_id();
+                }
+                cfg.bound_to = binding;
+                let _ = save_sync_config(vault_root, &cfg);
+            } else if plaintext && store_token(&cfg.device_id, &cfg.auth_token) {
                 let _ = write_config_file(vault_root, &cfg, false);
             }
             return cfg;
         }
     }
-    let def = SyncConfig::default();
+    let def = SyncConfig {
+        bound_to: binding,
+        ..SyncConfig::default()
+    };
     let _ = save_sync_config(vault_root, &def);
     def
 }
@@ -442,19 +496,14 @@ pub fn journal_local_delete(
         .tombstone(note_id, now)
         .map_err(|e| CommandError::Sql(e.to_string()))?;
     let config = load_sync_config(&h.vault.root);
-    let rev = h
+    let (rev, hash) = h
         .sync
         .get_current(note_id)
-        .map_err(|e| CommandError::Sql(e.to_string()))?
-        .map(|(r, _)| r)
-        .unwrap_or(0);
-    let op = sync::local_delete_op(
-        &config.device_id,
-        note_id,
-        rev,
-        clock::Hlc { ts: now, cnt: 0 },
-        now,
-    );
+        .map_err(sql_err)?
+        .unwrap_or_default();
+    let hlc = h.sync.tick_hlc(now).map_err(sql_err)?;
+    // The base names the version deleted: a peer that edited it since keeps the note.
+    let op = sync::local_delete_op(&config.device_id, note_id, rev, hlc, now).with_base(&hash);
     // The tombstone rev: a restore from any device builds on it.
     h.sync
         .set_current(note_id, op.new_rev, None)
@@ -476,13 +525,8 @@ pub fn journal_local_purge(h: &mut VaultHandle, note_id: &str) -> Result<(), Com
         .map_err(sql_err)?
         .map(|(r, _)| r)
         .unwrap_or(0);
-    let op = sync::local_purge_op(
-        &config.device_id,
-        note_id,
-        rev,
-        clock::Hlc { ts: now, cnt: 0 },
-        now,
-    );
+    let hlc = h.sync.tick_hlc(now).map_err(sql_err)?;
+    let op = sync::local_purge_op(&config.device_id, note_id, rev, hlc, now);
     h.sync
         .set_current(note_id, op.new_rev, None)
         .map_err(sql_err)?;
@@ -501,6 +545,29 @@ fn drop_trashed_copies(h: &VaultHandle, note_id: &str) -> Result<(), CommandErro
     Ok(())
 }
 
+/// Journal deletes for notes just removed from disk, except those whose id is
+/// still carried by another file (a duplicate was deleted, not the note): the
+/// reconcile hands the id to that file, and deleting it on every other device
+/// would remove the real note there.
+pub fn journal_deletes_unless_still_present(
+    h: &mut VaultHandle,
+    note_ids: &[String],
+    now: u64,
+) -> Result<(), CommandError> {
+    h.index.reconcile(&h.vault).map_err(sql_err)?;
+    for id in note_ids {
+        let live = h
+            .index
+            .get_note(id)
+            .map_err(sql_err)?
+            .is_some_and(|rec| !rec.tombstoned);
+        if !live {
+            journal_local_delete(h, id, now)?;
+        }
+    }
+    Ok(())
+}
+
 /// Journal a path change (rename or move) of `note_id`, now at `rel_path`, as
 /// an update op with the unchanged content and the new path. Peers that know
 /// about paths move the file; older peers see a no-op content update.
@@ -512,15 +579,15 @@ pub fn journal_local_path(
     let config = load_sync_config(&h.vault.root);
     let now = vault::now_secs();
     let bytes = h.vault.read(rel_path)?;
-    let rev = h
+    let (rev, hash) = h
         .sync
         .get_current(note_id)
         .map_err(sql_err)?
-        .map(|(r, _)| r)
-        .unwrap_or(0);
+        .unwrap_or_default();
     let hlc = h.sync.next_path_hlc(note_id, now).map_err(sql_err)?;
     let op = sync::local_update_op(&config.device_id, note_id, rev, bytes.clone(), hlc, now)
-        .with_path(rel_path);
+        .with_path(rel_path)
+        .with_base(&hash);
     h.sync.claim_path(&op).map_err(sql_err)?;
     h.sync
         .set_current(note_id, rev + 1, Some(&bytes))
@@ -580,10 +647,11 @@ fn journal_external_edits(h: &mut VaultHandle, device_id: &str) -> Result<usize,
         {
             continue;
         }
-        let hlc = clock::Hlc { ts: now, cnt: 0 };
+        let hlc = h.sync.tick_hlc(now).map_err(sql_err)?;
         let (op, rev) = match current {
-            Some((rev, _)) => (
-                sync::local_update_op(device_id, &rec.note_id, rev, bytes.clone(), hlc, now),
+            Some((rev, hash)) => (
+                sync::local_update_op(device_id, &rec.note_id, rev, bytes.clone(), hlc, now)
+                    .with_base(&hash),
                 rev + 1,
             ),
             None => {
@@ -633,21 +701,18 @@ fn journal_folder_changes(h: &mut VaultHandle, device_id: &str) -> Result<(), Co
         return Ok(());
     }
     let now = vault::now_secs();
-    let mut cnt = 0;
-    let mut stamp = || {
-        cnt += 1;
-        clock::Hlc { ts: now, cnt }
-    };
     // Reverse order deletes children before their parents.
     let gone: Vec<&String> = known.difference(&local).collect();
     for path in gone.into_iter().rev() {
         let id = format!("{FOLDER_OP_PREFIX}{path}");
-        let op = sync::local_delete_op(device_id, &id, 0, stamp(), now);
+        let hlc = h.sync.tick_hlc(now).map_err(sql_err)?;
+        let op = sync::local_delete_op(device_id, &id, 0, hlc, now);
         h.sync.append_journal(&op).map_err(sql_err)?;
     }
     for path in local.difference(&known) {
         let id = format!("{FOLDER_OP_PREFIX}{path}");
-        let mut op = sync::local_create_op(device_id, &id, Vec::new(), stamp(), now);
+        let hlc = h.sync.tick_hlc(now).map_err(sql_err)?;
+        let mut op = sync::local_create_op(device_id, &id, Vec::new(), hlc, now);
         op.content = None;
         h.sync.append_journal(&op).map_err(sql_err)?;
     }
@@ -714,8 +779,20 @@ fn with_vault<T>(
     f(h)
 }
 
+/// What applying one remote op changed on this device.
+#[derive(Default)]
+struct Applied {
+    pulled: bool,
+    conflict: bool,
+    changed: bool,
+}
+
 /// Apply pulled remote ops to the local vault. Returns
 /// `(ops_pulled, conflicts, any_local_change)`.
+///
+/// Ops that fail to apply (a locked file, a full disk) are queued and retried
+/// first on the next call, and later ops of the same note wait behind them so
+/// each note keeps its order.
 fn apply_pulled_ops(
     h: &mut VaultHandle,
     ops: &[Op],
@@ -724,158 +801,274 @@ fn apply_pulled_ops(
     let mut pulled = 0usize;
     let mut conflicts = 0usize;
     let mut any_local_change = false;
-    for op in ops {
-        // Skip operations that this device originated
-        if op.device_id == device_id {
+    let now = vault::now_secs();
+    let mut queue = h.sync.take_deferred_ops().map_err(sql_err)?;
+    queue.extend(ops.iter().cloned());
+    let mut blocked = std::collections::HashSet::new();
+    for op in &queue {
+        // Our own ops (also those journaled under an earlier device id) and ops
+        // already applied (pull pages repeat) change nothing.
+        if op.device_id == device_id || h.sync.is_known_op(&op.op_id).map_err(sql_err)? {
             continue;
         }
-
-        if let Some(folder) = op.note_id.strip_prefix(FOLDER_OP_PREFIX) {
-            if apply_folder_op(h, folder, op.kind == sync::OpKind::Delete)? {
-                any_local_change = true;
-                pulled += 1;
-            }
+        h.sync.observe_hlc(op.hlc, now).map_err(sql_err)?;
+        if blocked.contains(&op.note_id) {
+            h.sync.defer_op(op).map_err(sql_err)?;
             continue;
         }
-
-        // Determine note path: existing note, the path the op sets, or one
-        // derived from the content.
-        let existing = h
-            .index
-            .get_note(&op.note_id)
-            .map_err(|e| CommandError::Sql(e.to_string()))?;
-        // Last path change wins (HLC order), so all devices converge.
-        let path_wins = h.sync.claim_path(op).map_err(sql_err)?;
-        let wanted_path = op
-            .path
-            .as_deref()
-            .filter(|p| path_wins && is_free_note_path(h, p, &op.note_id));
-
-        let rel_path = if let Some(rec) = &existing {
-            rec.path.clone()
-        } else if let Some(p) = wanted_path {
-            p.to_string()
-        } else {
-            let title = derive_note_title(&op.content, &op.note_id);
-            let mut candidate = h.vault.dedup_path("notes/markdown", &title, "md");
-            let mut n = 2;
-            while h
-                .index
-                .is_path_taken(&candidate, Some(&op.note_id))
-                .unwrap_or(false)
-            {
-                candidate = h
-                    .vault
-                    .dedup_path("notes/markdown", &format!("{title} {n}"), "md");
-                n += 1;
+        match apply_one(h, op, device_id) {
+            Ok(step) => {
+                h.sync.mark_applied(&op.op_id).map_err(sql_err)?;
+                pulled += step.pulled as usize;
+                conflicts += step.conflict as usize;
+                any_local_change |= step.changed;
             }
-            candidate
-        };
-
-        // Permanent delete from another device's trash: drop our trashed
-        // copies. A note that is live here (it was edited concurrently) stays.
-        if op.purge {
-            if existing.as_ref().is_none_or(|rec| rec.tombstoned) {
-                drop_trashed_copies(h, &op.note_id)?;
-                h.sync.tombstone(&op.note_id, op.ts).map_err(sql_err)?;
-                h.sync
-                    .set_current(&op.note_id, op.new_rev, None)
-                    .map_err(sql_err)?;
-                any_local_change = true;
-                pulled += 1;
-            }
-            continue;
-        }
-
-        // Restore from another device's trash: a content op built on our
-        // tombstone rev brings the note back (stale edits have a lower base and
-        // keep being rejected by `apply_remote`).
-        let local_rev = h
-            .sync
-            .get_current(&op.note_id)
-            .map_err(sql_err)?
-            .map(|(r, _)| r);
-        if let (Some(content), true, Some(rev)) = (
-            &op.content,
-            h.sync.is_tombstoned(&op.note_id).map_err(sql_err)?,
-            local_rev,
-        ) {
-            if op.kind != sync::OpKind::Delete && op.base_rev >= rev {
-                drop_trashed_copies(h, &op.note_id)?;
-                let mut target = wanted_path.map_or(rel_path.clone(), str::to_string);
-                if h.vault.exists(&target) {
-                    let title = derive_note_title(&op.content, &op.note_id);
-                    let dir = target.rsplit_once('/').map_or("notes/markdown", |(d, _)| d);
-                    target = h.vault.dedup_path(dir, &title, "md");
-                }
-                h.vault.write_atomic(&target, content)?;
-                h.sync.clear_tombstone(&op.note_id).map_err(sql_err)?;
-                h.sync
-                    .set_current(&op.note_id, op.new_rev, Some(content))
-                    .map_err(sql_err)?;
-                let _ = h.index.reconcile(&h.vault);
-                any_local_change = true;
-                pulled += 1;
-                continue;
-            }
-        }
-
-        let outcome = match sync::apply_remote(&mut h.sync, &h.vault, op, "markdown", &rel_path) {
-            Ok(o) => o,
             Err(e) => {
-                log::warn!("sync: error applying remote op {}: {}", op.op_id, e);
-                conflicts += 1;
-                continue;
-            }
-        };
-
-        match outcome {
-            ApplyOutcome::Created | ApplyOutcome::FastForward => {
-                if let Ok(bytes) = h.vault.read(&rel_path) {
-                    let _ =
-                        h.index
-                            .reindex_note(&op.note_id, &rel_path, EditorKind::Markdown, &bytes);
-                    any_local_change = true;
-                    pulled += 1;
-                }
-            }
-            ApplyOutcome::Merged { conflict } => {
-                if let Ok(bytes) = h.vault.read(&rel_path) {
-                    let _ =
-                        h.index
-                            .reindex_note(&op.note_id, &rel_path, EditorKind::Markdown, &bytes);
-                    any_local_change = true;
-                    pulled += 1;
-                    if conflict {
-                        conflicts += 1;
-                    }
-                }
-            }
-            ApplyOutcome::Deleted => {
-                let _ = h.index.mark_tombstoned(&op.note_id);
-                any_local_change = true;
-                pulled += 1;
-            }
-            ApplyOutcome::DeleteConflict => {
-                conflicts += 1;
-            }
-            ApplyOutcome::Noop | ApplyOutcome::RejectedTombstone => {}
-        }
-
-        // A rename/move from another device: move the file to the new path.
-        if let (Some(rec), Some(target)) = (&existing, wanted_path) {
-            if target != rec.path && h.vault.exists(&rec.path) {
-                match h.vault.move_to(&rec.path, target) {
-                    Ok(()) => {
-                        let _ = h.index.reconcile(&h.vault);
-                        any_local_change = true;
-                    }
-                    Err(e) => log::warn!("sync: could not move {} to {target}: {e}", rec.path),
-                }
+                log::warn!("sync: op {} deferred, could not apply it: {e}", op.op_id);
+                h.sync.defer_op(op).map_err(sql_err)?;
+                blocked.insert(op.note_id.clone());
             }
         }
     }
     Ok((pulled, conflicts, any_local_change))
+}
+
+/// Apply one remote op (see `apply_pulled_ops`).
+fn apply_one(h: &mut VaultHandle, op: &Op, device_id: &str) -> Result<Applied, CommandError> {
+    let done = Applied {
+        pulled: true,
+        changed: true,
+        conflict: false,
+    };
+    if let Some(folder) = op.note_id.strip_prefix(FOLDER_OP_PREFIX) {
+        let changed = apply_folder_op(h, folder, op.kind == sync::OpKind::Delete)?;
+        return Ok(Applied {
+            pulled: changed,
+            changed,
+            conflict: false,
+        });
+    }
+    // Same NFC names as the local scan, whatever form the sender used.
+    let normalized;
+    let op = match op.path.as_deref().map(notium_core::paths::nfc) {
+        Some(std::borrow::Cow::Owned(path)) => {
+            normalized = op.clone().with_path(path);
+            &normalized
+        }
+        _ => op,
+    };
+
+    // Determine note path: existing note, the path the op sets, or one
+    // derived from the content.
+    let existing = h.index.get_note(&op.note_id).map_err(sql_err)?;
+    // Last path change wins (HLC order), so all devices converge.
+    let path_wins = h.sync.claim_path(op).map_err(sql_err)?;
+    let wanted_path = op
+        .path
+        .as_deref()
+        .filter(|p| path_wins && is_free_note_path(h, p, &op.note_id));
+
+    let rel_path = if let Some(rec) = &existing {
+        rec.path.clone()
+    } else if let Some(p) = wanted_path {
+        p.to_string()
+    } else {
+        let title = derive_note_title(&op.content, &op.note_id);
+        let mut candidate = h.vault.dedup_path("notes/markdown", &title, "md");
+        let mut n = 2;
+        while h
+            .index
+            .is_path_taken(&candidate, Some(&op.note_id))
+            .unwrap_or(false)
+        {
+            candidate = h
+                .vault
+                .dedup_path("notes/markdown", &format!("{title} {n}"), "md");
+            n += 1;
+        }
+        candidate
+    };
+
+    // Permanent delete from another device's trash: drop our trashed
+    // copies. A note that is live here (it was edited concurrently) stays.
+    if op.purge {
+        if existing.as_ref().is_none_or(|rec| rec.tombstoned) {
+            drop_trashed_copies(h, &op.note_id)?;
+            h.sync.tombstone(&op.note_id, op.ts).map_err(sql_err)?;
+            h.sync
+                .set_current(&op.note_id, op.new_rev, None)
+                .map_err(sql_err)?;
+            return Ok(done);
+        }
+        return Ok(Applied::default());
+    }
+
+    // Restore from another device's trash: a content op built on our
+    // tombstone rev brings the note back (stale edits have a lower base and
+    // keep being rejected by `apply_remote`).
+    let local_rev = h
+        .sync
+        .get_current(&op.note_id)
+        .map_err(sql_err)?
+        .map(|(r, _)| r);
+    if let (Some(content), true, Some(rev)) = (
+        &op.content,
+        h.sync.is_tombstoned(&op.note_id).map_err(sql_err)?,
+        local_rev,
+    ) {
+        if op.kind != sync::OpKind::Delete && op.base_rev >= rev {
+            drop_trashed_copies(h, &op.note_id)?;
+            let mut target = wanted_path.map_or(rel_path.clone(), str::to_string);
+            // A file already there that is this same note (restored here, or
+            // never trashed) is updated in place: writing next to it would
+            // leave two files with one id.
+            if h.vault.exists(&target) && !carries_id(h, &target, &op.note_id) {
+                let title = vault::title_from_path(&target);
+                let dir = target.rsplit_once('/').map_or("notes/markdown", |(d, _)| d);
+                target = h.vault.dedup_path(dir, &title, "md");
+            }
+            h.vault.write_atomic(&target, content)?;
+            h.sync.clear_tombstone(&op.note_id).map_err(sql_err)?;
+            h.sync
+                .set_current(&op.note_id, op.new_rev, Some(content))
+                .map_err(sql_err)?;
+            let _ = h.index.reconcile(&h.vault);
+            return Ok(done);
+        }
+    }
+
+    let (outcome, copy) =
+        sync::apply_remote_ex(&mut h.sync, &h.vault, op, "markdown", &rel_path).map_err(sql_err)?;
+
+    let mut step = Applied::default();
+    match outcome {
+        ApplyOutcome::Created | ApplyOutcome::FastForward | ApplyOutcome::Merged { .. } => {
+            if let Ok(bytes) = h.vault.read(&rel_path) {
+                let _ = h
+                    .index
+                    .reindex_note(&op.note_id, &rel_path, EditorKind::Markdown, &bytes);
+                step = Applied {
+                    conflict: copy.is_some(),
+                    ..done
+                };
+            }
+            if let ApplyOutcome::Merged { .. } = outcome {
+                journal_merge_result(h, op, &rel_path, device_id, copy)?;
+            }
+        }
+        ApplyOutcome::Deleted => {
+            let _ = h.index.mark_tombstoned(&op.note_id);
+            step = done;
+        }
+        ApplyOutcome::DeleteConflict => {
+            // Edited here while deleted elsewhere: the edit wins on every
+            // device, so bring the note back there.
+            if existing.as_ref().is_some_and(|rec| !rec.tombstoned) {
+                journal_restore(h, &op.note_id, &rel_path, op.new_rev, device_id)?;
+            }
+            step.conflict = true;
+        }
+        ApplyOutcome::Noop | ApplyOutcome::RejectedTombstone => {}
+    }
+
+    // A rename/move from another device: move the file to the new path.
+    if let (Some(rec), Some(target)) = (&existing, wanted_path) {
+        if target != rec.path && h.vault.exists(&rec.path) {
+            match h.vault.move_to(&rec.path, target) {
+                Ok(()) => {
+                    let _ = h.index.reconcile(&h.vault);
+                    step.changed = true;
+                }
+                Err(e) => log::warn!("sync: could not move {} to {target}: {e}", rec.path),
+            }
+        }
+    }
+    Ok(step)
+}
+
+/// After a merge, journal what peers cannot work out alone: the conflict copy
+/// (a note of its own) and the merged content when it differs from the op's,
+/// so peers that do not merge (the web client) still converge.
+fn journal_merge_result(
+    h: &mut VaultHandle,
+    op: &Op,
+    rel_path: &str,
+    device_id: &str,
+    copy: Option<sync::ConflictCopy>,
+) -> Result<(), CommandError> {
+    let now = vault::now_secs();
+    if let Some(copy) = copy {
+        h.index
+            .reindex_note(
+                &copy.note_id,
+                &copy.path,
+                EditorKind::Markdown,
+                &copy.content,
+            )
+            .map_err(sql_err)?;
+        let hlc = h.sync.tick_hlc(now).map_err(sql_err)?;
+        let create =
+            sync::local_create_op(device_id, &copy.note_id, copy.content.clone(), hlc, now)
+                .with_path(&copy.path);
+        h.sync.claim_path(&create).map_err(sql_err)?;
+        h.sync
+            .set_current(&copy.note_id, 0, Some(&copy.content))
+            .map_err(sql_err)?;
+        h.sync.append_journal(&create).map_err(sql_err)?;
+    }
+    let merged = h.vault.read(rel_path)?;
+    if op.content.as_deref() == Some(&merged[..]) {
+        return Ok(());
+    }
+    let rev = h
+        .sync
+        .get_current(&op.note_id)
+        .map_err(sql_err)?
+        .map_or(0, |(r, _)| r);
+    let base = op
+        .content
+        .as_deref()
+        .map(notium_core::hash::content_hash)
+        .unwrap_or_default();
+    let hlc = h.sync.tick_hlc(now).map_err(sql_err)?;
+    let update = sync::local_update_op(device_id, &op.note_id, rev, merged.clone(), hlc, now)
+        .with_base(&base);
+    h.sync
+        .set_current(&op.note_id, rev + 1, Some(&merged))
+        .map_err(sql_err)?;
+    h.sync.append_journal(&update).map_err(sql_err)
+}
+
+/// Journal the note at `rel_path` as a restore built on the tombstone rev
+/// `deleted_rev` of a concurrent delete, so devices that deleted it bring it back.
+fn journal_restore(
+    h: &mut VaultHandle,
+    note_id: &str,
+    rel_path: &str,
+    deleted_rev: u64,
+    device_id: &str,
+) -> Result<(), CommandError> {
+    let Ok(bytes) = h.vault.read(rel_path) else {
+        return Ok(());
+    };
+    let now = vault::now_secs();
+    let hlc = h.sync.next_path_hlc(note_id, now).map_err(sql_err)?;
+    let op = sync::local_update_op(device_id, note_id, deleted_rev, bytes.clone(), hlc, now)
+        .with_path(rel_path);
+    h.sync.claim_path(&op).map_err(sql_err)?;
+    h.sync
+        .set_current(note_id, deleted_rev + 1, Some(&bytes))
+        .map_err(sql_err)?;
+    h.sync.append_journal(&op).map_err(sql_err)
+}
+
+/// Whether the note file at `rel_path` carries `note_id` in its frontmatter.
+fn carries_id(h: &VaultHandle, rel_path: &str, note_id: &str) -> bool {
+    h.vault
+        .read(rel_path)
+        .ok()
+        .and_then(|b| vault::extract_embedded_id(&b, EditorKind::Markdown))
+        .is_some_and(|id| id == note_id)
 }
 
 /// Whether a remote op may place `note_id` at `path`: a safe note path that no
@@ -888,15 +1081,25 @@ fn is_free_note_path(h: &VaultHandle, path: &str, note_id: &str) -> bool {
             .ok()
             .flatten()
             .map_or(!h.vault.exists(path), |rec| {
-                rec.path == path || !h.vault.exists(path)
+                // A case-only rename names the note's own file on a
+                // case-insensitive file system (Windows, macOS).
+                rec.path.to_lowercase() == path.to_lowercase() || !h.vault.exists(path)
             })
 }
+
+/// Page size of `/sync/pull` (server/cloudflare-sync/src/index.ts).
+const PULL_PAGE: usize = 500;
+/// Pages pulled per cycle at most; the next cycle continues from the cursor.
+const MAX_PULL_PAGES: usize = 20;
 
 /// Execute a complete sync cycle (Push mutations -> Pull remote -> Sync blobs).
 ///
 /// The vault lock is taken only for the short local steps (`with_vault`); every
 /// HTTP request runs unlocked so IPC commands such as `note_save` are never
 /// blocked behind a slow or unreachable server.
+///
+/// A failed push does not skip the pull: this device keeps receiving changes
+/// while the server refuses its own, and the push error is returned at the end.
 pub fn run_sync_cycle(
     shared: &SharedVault,
     root: &Path,
@@ -927,19 +1130,33 @@ pub fn run_sync_cycle(
     // Heal first: journal delete ops for tombstoned notes that were never synced
     // as deleted (e.g. deleted via a folder delete before that path journaled ops).
     let unpushed = with_vault(shared, root, |h| {
-        heal_tombstoned_deletes(h)?;
+        // External edits first: their reconcile revives a note whose id a
+        // surviving duplicate still carries, so healing never deletes it.
         report.external_edits = journal_external_edits(h, &config.device_id)?;
+        heal_tombstoned_deletes(h)?;
         journal_folder_changes(h, &config.device_id)?;
         h.sync.get_unpushed_ops().map_err(sql_err)
     })?;
     const CHUNK_SIZE: usize = 50;
+    let mut push_error = None;
+    let mut rejected = 0usize;
     for chunk in unpushed.chunks(CHUNK_SIZE) {
-        let push_res = client.push(chunk).map_err(CommandError::Io)?;
-        let accepted: Vec<String> = if !push_res.accepted_op_ids.is_empty() {
-            push_res.accepted_op_ids
-        } else {
-            chunk.iter().map(|o| o.op_id.clone()).collect()
+        let push_res = match client.push(chunk) {
+            Ok(res) => res,
+            Err(e) => {
+                push_error = Some(e);
+                break;
+            }
         };
+        // Rejected ops stay queued. A reply that lists neither (no server
+        // version does) is read as everything accepted.
+        rejected += push_res.rejected_op_ids.len();
+        let accepted: Vec<String> =
+            if push_res.accepted_op_ids.is_empty() && push_res.rejected_op_ids.is_empty() {
+                chunk.iter().map(|o| o.op_id.clone()).collect()
+            } else {
+                push_res.accepted_op_ids
+            };
         with_vault(shared, root, |h| {
             let ids: Vec<&str> = accepted.iter().map(|s| s.as_str()).collect();
             h.sync.mark_ops_synced(&ids).map_err(sql_err)
@@ -947,90 +1164,47 @@ pub fn run_sync_cycle(
         report.ops_pushed += accepted.len();
     }
 
-    // 2. Pull remote mutations and apply them locally.
-    let last_cursor = with_vault(shared, root, |h| {
+    // 2. Pull pages of remote mutations until caught up, applying each one.
+    let mut cursor = with_vault(shared, root, |h| {
         h.sync.get_meta("last_pull_cursor").map_err(sql_err)
     })?;
-    let pull_res = client
-        .pull(last_cursor.as_deref())
-        .map_err(CommandError::Io)?;
+    let mut any_local_change = false;
+    let mut server_hashes = std::collections::HashSet::new();
+    for _ in 0..MAX_PULL_PAGES {
+        let page = client.pull(cursor.as_deref()).map_err(CommandError::Io)?;
+        let (pulled, conflicts, changed) = with_vault(shared, root, |h| {
+            apply_pulled_ops(h, &page.ops, &config.device_id)
+        })?;
+        report.ops_pulled += pulled;
+        report.conflicts += conflicts;
+        any_local_change |= changed;
+        server_hashes.extend(page.blobs.iter().map(|b| b.hash.clone()));
 
-    let (pulled, conflicts, mut any_local_change) = with_vault(shared, root, |h| {
-        apply_pulled_ops(h, &pull_res.ops, &config.device_id)
-    })?;
-    report.ops_pulled += pulled;
-    report.conflicts += conflicts;
-
-    // 3. Sync attachments
-    // 3a. Download missing or updated remote blobs from D1
-    let to_download: Vec<BlobRef> = with_vault(shared, root, |h| {
-        let mut out = Vec::new();
-        for blob in &pull_res.blobs {
-            if !is_safe_attachment_rel_path(&blob.path) {
-                continue;
-            }
-            if h.sync
-                .is_blob_synced(&blob.hash, &blob.path)
-                .unwrap_or(false)
-                && h.vault.exists(&blob.path)
-            {
-                continue;
-            }
-            if h.vault.exists(&blob.path) {
-                if let Ok(existing) = h.vault.read(&blob.path) {
-                    if notium_core::hash::content_hash(&existing) == blob.hash {
-                        let _ = h.sync.mark_blob_synced(&blob.hash, &blob.path);
-                        continue;
-                    }
-                }
-            }
-            out.push(blob.clone());
+        // 3a. Download the page's missing or updated blobs. One that failed to
+        // download (not one the server no longer has) keeps the cursor here,
+        // so the page is read again next cycle.
+        let (downloaded, failed) = download_blobs(shared, root, &client, &page.blobs)?;
+        report.blobs_synced += downloaded;
+        any_local_change |= downloaded > 0;
+        if failed {
+            break;
         }
-        Ok(out)
-    })?;
-
-    let mut blob_download_failed = false;
-    for blob in &to_download {
-        match client.pull_blob(&blob.hash) {
-            Ok(bytes) => {
-                if (bytes.len() as u64) <= MAX_D1_BLOB_BYTES
-                    && notium_core::hash::content_hash(&bytes) == blob.hash
-                {
-                    let written = with_vault(shared, root, |h| {
-                        if h.vault.write_atomic(&blob.path, &bytes).is_ok() {
-                            let _ = h.sync.mark_blob_synced(&blob.hash, &blob.path);
-                            Ok(true)
-                        } else {
-                            Ok(false)
-                        }
-                    })?;
-                    if written {
-                        report.blobs_synced += 1;
-                        any_local_change = true;
-                    }
-                }
-            }
-            Err(_) => {
-                blob_download_failed = true;
-            }
+        let next = page.cursor.filter(|c| !c.is_empty());
+        let advanced = next.is_some() && next != cursor;
+        if let Some(c) = &next {
+            with_vault(shared, root, |h| {
+                h.sync.set_meta("last_pull_cursor", c).map_err(sql_err)
+            })?;
         }
-    }
-
-    if !blob_download_failed {
-        if let Some(new_cursor) = pull_res.cursor.as_deref() {
-            if !new_cursor.is_empty() {
-                with_vault(shared, root, |h| {
-                    let _ = h.sync.set_meta("last_pull_cursor", new_cursor);
-                    Ok(())
-                })?;
-            }
+        let full = page.ops.len() >= PULL_PAGE || page.blobs.len() >= PULL_PAGE;
+        cursor = next.or(cursor);
+        if !full || !advanced {
+            break;
         }
     }
 
     // 3b. Upload local attachments if within D1 900 KB limit and not yet in synced_blobs
     let to_upload = with_vault(shared, root, |h| {
-        let known_server_hashes: std::collections::HashSet<&str> =
-            pull_res.blobs.iter().map(|b| b.hash.as_str()).collect();
         let mut out = Vec::new();
         if let Ok(local_atts) = h.vault.scan_attachments() {
             for att in local_atts {
@@ -1043,7 +1217,7 @@ pub fn run_sync_cycle(
                 {
                     continue;
                 }
-                if known_server_hashes.contains(att.hash.as_str()) {
+                if server_hashes.contains(&att.hash) {
                     let _ = h.sync.mark_blob_synced(&att.hash, &att.rel_path);
                     continue;
                 }
@@ -1074,7 +1248,75 @@ pub fn run_sync_cycle(
         Ok(())
     })?;
 
+    if let Some(e) = push_error {
+        return Err(CommandError::Io(e));
+    }
+    if rejected > 0 {
+        return Err(CommandError::Io(format!(
+            "El servidor rechazó {rejected} cambios (¿nota demasiado grande?); siguen pendientes"
+        )));
+    }
     Ok(report)
+}
+
+/// Download the blobs of a pull page that are missing or changed here.
+/// Returns `(written, failed)`; a blob the server no longer has is skipped.
+fn download_blobs(
+    shared: &SharedVault,
+    root: &Path,
+    client: &SyncClient,
+    blobs: &[BlobRef],
+) -> Result<(usize, bool), CommandError> {
+    let to_download: Vec<BlobRef> = with_vault(shared, root, |h| {
+        let mut out = Vec::new();
+        for blob in blobs {
+            if !is_safe_attachment_rel_path(&blob.path) {
+                continue;
+            }
+            if h.sync
+                .is_blob_synced(&blob.hash, &blob.path)
+                .unwrap_or(false)
+                && h.vault.exists(&blob.path)
+            {
+                continue;
+            }
+            if h.vault.exists(&blob.path) {
+                if let Ok(existing) = h.vault.read(&blob.path) {
+                    if notium_core::hash::content_hash(&existing) == blob.hash {
+                        let _ = h.sync.mark_blob_synced(&blob.hash, &blob.path);
+                        continue;
+                    }
+                }
+            }
+            out.push(blob.clone());
+        }
+        Ok(out)
+    })?;
+
+    let mut written = 0usize;
+    let mut failed = false;
+    for blob in &to_download {
+        match client.pull_blob(&blob.hash) {
+            Ok(Some(bytes)) => {
+                if (bytes.len() as u64) <= MAX_D1_BLOB_BYTES
+                    && notium_core::hash::content_hash(&bytes) == blob.hash
+                {
+                    let ok = with_vault(shared, root, |h| {
+                        if h.vault.write_atomic(&blob.path, &bytes).is_ok() {
+                            let _ = h.sync.mark_blob_synced(&blob.hash, &blob.path);
+                            Ok(true)
+                        } else {
+                            Ok(false)
+                        }
+                    })?;
+                    written += ok as usize;
+                }
+            }
+            Ok(None) => log::warn!("sync: blob {} is gone from the server", blob.path),
+            Err(_) => failed = true,
+        }
+    }
+    Ok((written, failed))
 }
 
 fn derive_note_title(content: &Option<Vec<u8>>, note_id: &str) -> String {
@@ -1404,6 +1646,7 @@ mod tests {
             ts,
             path: path.map(str::to_string),
             purge: false,
+            base_hash: None,
         }
     }
 
@@ -1506,6 +1749,67 @@ mod tests {
         assert_eq!(trashed(&h, "n1"), 1);
         apply_pulled_ops(&mut h, &[remote_delete("n1", 3, 50, true)], "dev_local").unwrap();
         assert_eq!(trashed(&h, "n1"), 0);
+    }
+
+    #[test]
+    fn restore_onto_the_notes_own_file_updates_it_in_place() {
+        let (_d, mut h) = temp_vault();
+        let create = remote(
+            "n1",
+            sync::OpKind::Create,
+            0,
+            10,
+            Some("notes/markdown/A.md"),
+        );
+        let bytes = create.content.clone().unwrap();
+        apply_pulled_ops(&mut h, &[create], "dev_local").unwrap();
+        apply_pulled_ops(&mut h, &[remote_delete("n1", 0, 20, false)], "dev_local").unwrap();
+        // The note's file is back at its path before the restore arrives.
+        h.vault.write_atomic("notes/markdown/A.md", &bytes).unwrap();
+
+        let mut restore = remote(
+            "n1",
+            sync::OpKind::Update,
+            2,
+            30,
+            Some("notes/markdown/A.md"),
+        );
+        restore.base_rev = 1;
+        apply_pulled_ops(&mut h, &[restore], "dev_local").unwrap();
+        let files: Vec<String> = h
+            .vault
+            .scan_notes()
+            .unwrap()
+            .into_iter()
+            .map(|n| n.rel_path)
+            .collect();
+        assert_eq!(files, ["notes/markdown/A.md"]);
+        assert!(!h.index.get_note("n1").unwrap().unwrap().tombstoned);
+    }
+
+    #[test]
+    fn deleting_a_duplicate_never_deletes_the_note_elsewhere() {
+        let (_d, mut h) = temp_vault();
+        let note = create_impl_for_test(&mut h, "Pendientes");
+        let real = path_of(&h, &note);
+        // An older copy carrying the same id, named so it sorts first.
+        let copy = "notes/markdown/Nota note_01a.md";
+        h.vault
+            .write_atomic(copy, &h.vault.read(&real).unwrap())
+            .unwrap();
+        h.index.reconcile(&h.vault).unwrap();
+        assert_eq!(path_of(&h, &note), real, "the indexed file keeps the id");
+
+        // Deleting the real file while the copy remains: the id moves to the
+        // copy and no delete reaches other devices.
+        crate::commands::delete_impl(&mut h, &note).unwrap();
+        assert!(!h.sync.has_delete_op(&note).unwrap());
+        assert_eq!(path_of(&h, &note), copy);
+        assert!(!h.index.get_note(&note).unwrap().unwrap().tombstoned);
+
+        // Deleting the last file that carries it is a real delete.
+        crate::commands::delete_impl(&mut h, &note).unwrap();
+        assert!(h.sync.has_delete_op(&note).unwrap());
     }
 
     #[test]
@@ -1685,6 +1989,7 @@ mod tests {
             enabled: true,
             auto_sync: true,
             interval_secs: 10,
+            bound_to: String::new(),
         };
 
         let cycle = {
@@ -1929,6 +2234,7 @@ mod tests {
                         ts: 1000,
                         path: None,
                         purge: false,
+                        base_hash: None,
                     };
                     let pull_resp = PullResponse {
                         cursor: Some("cur_2".into()),
@@ -1965,6 +2271,7 @@ mod tests {
             enabled: true,
             auto_sync: true,
             interval_secs: 10,
+            bound_to: String::new(),
         };
 
         let (shared, root) = share(h);
@@ -1983,3 +2290,7 @@ mod tests {
         assert!(h.vault.root.join(&rec.path).exists());
     }
 }
+
+#[cfg(test)]
+#[path = "sync_audit_tests.rs"]
+mod audit_tests;

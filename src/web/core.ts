@@ -45,10 +45,13 @@ export const upsertField = (text: string, key: string, val: string): string =>
 
 export const normalizeTitle = (s: string): string => wasm.normalize_title(s);
 
-export const sanitizeTitle = (title: string): string => wasm.sanitize_title(title);
+/** NFC like the native build (`paths::nfc`), so a note has one path everywhere. */
+export const sanitizeTitle = (title: string): string =>
+  wasm.sanitize_title(title.normalize("NFC"));
 
 /** Folder path relative to `notes/markdown`; throws on `.`/`..` segments. */
-export const sanitizeFolderPath = (folder: string): string => wasm.sanitize_folder_path(folder);
+export const sanitizeFolderPath = (folder: string): string =>
+  wasm.sanitize_folder_path(folder.normalize("NFC"));
 
 export const titleFromPath = (relPath: string): string => wasm.title_from_path(relPath);
 

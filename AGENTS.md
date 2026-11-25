@@ -75,6 +75,7 @@ The PC and Android builds both compile Rust into `target/`; run them one after t
 - Run `npm run check` (`svelte-check`) and `npm run build` after making frontend changes.
 - Run `cargo test --lib` after making changes in `crates/notium-core` or `src-tauri`.
 - Run `npm run check:web` and `npm run test:web` after changes in `src/web`, `src/lib/ipc`, `crates/notium-wasm` or the pure modules of `crates/notium-core` (see [`docs/WEB.md`](docs/WEB.md)). `cargo build -p notium-core --no-default-features` must keep compiling.
+- Run `npm run test:server` after changes in `server/cloudflare-sync` (the worker against an in-memory D1 stand-in).
 
 ## 4. Roadmap and Backlog (`docs/ROADMAP_AND_BACKLOG.md`)
 

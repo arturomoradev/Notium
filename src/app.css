@@ -1437,8 +1437,8 @@ textarea,
 }
 .cm-rendered-table {
   border-collapse: collapse;
-  width: max-content;
-  min-width: 100%;
+  /* Cells wrap to fit the editor; a table that still can't fit scrolls in .cm-table-wrap. */
+  width: 100%;
 }
 .cm-rendered-table th,
 .cm-rendered-table td {

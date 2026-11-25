@@ -219,3 +219,30 @@ test("trash: deletes keep the content, restores revive it, purges erase it", () 
   assert.equal(s.notes.n1.doc, "");
   assert.equal(trashed(s).length, 0);
 });
+
+test("local edits name the version they replace; far-future clocks are not adopted", async () => {
+  const { contentHash } = await import("../src/web/core.ts");
+  const s = emptyState();
+  applyRemote(s, [op({})], "web");
+  const before = s.notes.n1.doc;
+  localOp(s, "web", "n1", "update", "# nuevo\n", s.notes.n1.rev);
+  assert.equal(s.pending.at(-1).base_hash, contentHash(new TextEncoder().encode(before)));
+  localOp(s, "web", "n2", "create", "# otra\n", 0);
+  assert.equal(s.pending.at(-1).base_hash, undefined);
+
+  const clock = { ...s.clock };
+  const future = Math.floor(Date.now() / 1000) + 10 * 24 * 3600;
+  applyRemote(s, [op({ op_id: "f", note_id: "n3", hlc: { ts: future, cnt: 0 } })], "web");
+  assert.deepEqual(s.clock, clock);
+});
+
+test("names arrive and are made in NFC, like on the devices", async () => {
+  const { sanitizeTitle, sanitizeFolderPath } = await import("../src/web/core.ts");
+  assert.equal(sanitizeTitle("Café"), "Café");
+  assert.equal(sanitizeFolderPath("México/x"), "México/x");
+  const s = emptyState();
+  applyRemote(s, [op({ path: "notes/markdown/Café.md" })], "web");
+  assert.equal(s.notes.n1.path, "notes/markdown/Café.md");
+  applyRemote(s, [op({ op_id: "f1", note_id: "folder:México", content: null })], "web");
+  assert.ok(s.folders["México"]);
+});

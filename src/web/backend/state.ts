@@ -25,6 +25,8 @@ export interface WireOp {
   path?: string;
   /** On a delete: permanent delete, removes the note from every trash. */
   purge?: boolean;
+  /** Hash of the content the op was built on (merge base for devices). */
+  base_hash?: string;
 }
 
 export interface WebNote {
@@ -95,6 +97,9 @@ const encoder = new TextEncoder();
 
 export const nowSecs = (): number => Math.floor(Date.now() / 1000);
 
+/** Same as notium-core `MAX_CLOCK_SKEW_SECS`: clocks further ahead are not adopted. */
+const MAX_CLOCK_SKEW_SECS = 24 * 60 * 60;
+
 /** Same rule as `Hlc::tick`: devices stamp ops in Unix seconds. */
 export function tick(clock: Hlc, wall = nowSecs()): Hlc {
   return wall > clock.ts ? { ts: wall, cnt: 0 } : { ts: clock.ts, cnt: clock.cnt + 1 };
@@ -103,12 +108,16 @@ export function tick(clock: Hlc, wall = nowSecs()): Hlc {
 /** Apply ops pulled from the server. Returns the ids of notes that changed. */
 export function applyRemote(state: VaultState, ops: WireOp[], deviceId: string): string[] {
   const changed: string[] = [];
-  for (const op of ops) {
+  for (let op of ops) {
+    // Older peers may send NFD names; the devices store NFC ones.
+    if (op.path) op = { ...op, path: op.path.normalize("NFC") };
     const kind = op.kind.toLowerCase() as OpKind;
     const note = state.notes[op.note_id];
-    if (op.hlc.ts > state.clock.ts) state.clock = { ...op.hlc };
+    if (op.hlc.ts > state.clock.ts && op.hlc.ts <= nowSecs() + MAX_CLOCK_SKEW_SECS) {
+      state.clock = { ...op.hlc };
+    }
     if (op.note_id.startsWith(FOLDER_OP_PREFIX)) {
-      const folder = op.note_id.slice(FOLDER_OP_PREFIX.length);
+      const folder = op.note_id.slice(FOLDER_OP_PREFIX.length).normalize("NFC");
       state.folders ??= {};
       if (kind === "delete") delete state.folders[folder];
       else state.folders[folder] = true;
@@ -140,7 +149,8 @@ export function applyRemote(state: VaultState, ops: WireOp[], deviceId: string):
     if (note?.deleted && op.base_rev < note.rev) continue;
     const path = claimPath(state, op) ? op.path : note?.path;
     // Already seen (pull pages can repeat ops) or older than what we show: keep
-    // ours. Concurrent edits are merged by a device, which pushes the result.
+    // ours. Concurrent edits are merged by a device, which pushes the result
+    // (sync.rs `journal_merge_result`).
     // An unpushed local edit also wins here; the device merges both when it
     // pulls our op (base_rev keeps the common ancestor).
     if (
@@ -180,6 +190,11 @@ export function localOp(
   state.clock = tick(state.clock);
   const prev = state.notes[noteId];
   const newRev = kind === "create" ? 0 : Math.max(prev?.rev ?? 0, baseRev) + 1;
+  // The version this op replaces, so devices merge against the right base.
+  const baseHash =
+    kind !== "create" && prev && !prev.deleted && prev.doc
+      ? core.contentHash(encoder.encode(prev.doc))
+      : undefined;
   const op: WireOp = {
     op_id: `op_web${crypto.randomUUID().replaceAll("-", "")}`,
     device_id: deviceId,
@@ -192,6 +207,7 @@ export function localOp(
     ts: state.clock.ts,
     ...(path ? { path } : {}),
     ...(purge ? { purge } : {}),
+    ...(baseHash ? { base_hash: baseHash } : {}),
   };
   if (path) state.pathStamps[noteId] = pathStamp(op);
   state.pending.push(op);

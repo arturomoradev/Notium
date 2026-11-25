@@ -49,8 +49,12 @@ pub fn open_vault(root: &Path) -> Result<VaultHandle, CommandError> {
     index
         .reconcile(&vault)
         .map_err(|e| CommandError::Sql(format!("reconcile: {e}")))?;
-    let sync = SyncDb::open(&vault.sync_db_path())
+    let mut sync = SyncDb::open(&vault.sync_db_path())
         .map_err(|e| CommandError::Sql(format!("open_sync: {e}")))?;
+    let now = notium_core::vault::now_ts().parse::<u64>().unwrap_or(0);
+    if let Err(e) = sync.maybe_prune(now) {
+        log::warn!("sync.db prune failed: {e}");
+    }
     Ok(VaultHandle {
         vault,
         index,

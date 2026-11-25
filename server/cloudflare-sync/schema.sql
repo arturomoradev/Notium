@@ -13,6 +13,9 @@ CREATE TABLE IF NOT EXISTS journal (
   ts INTEGER NOT NULL,
   path TEXT,
   purge INTEGER NOT NULL DEFAULT 0,
+  base_hash TEXT,
+  -- Arrival order shared with blobs: the /sync/pull cursor.
+  seq INTEGER,
   PRIMARY KEY (vault_id, op_id)
 );
 
@@ -23,8 +26,13 @@ CREATE TABLE IF NOT EXISTS blobs (
   size INTEGER NOT NULL DEFAULT 0,
   data BLOB NOT NULL,
   ts INTEGER NOT NULL,
+  seq INTEGER,
   PRIMARY KEY (vault_id, hash, path)
 );
 
 CREATE INDEX IF NOT EXISTS idx_journal_vault_ts ON journal(vault_id, ts);
 CREATE INDEX IF NOT EXISTS idx_blobs_vault_ts ON blobs(vault_id, ts);
+CREATE INDEX IF NOT EXISTS idx_journal_seq ON journal(seq);
+CREATE INDEX IF NOT EXISTS idx_blobs_seq ON blobs(seq);
+CREATE INDEX IF NOT EXISTS idx_journal_vault_seq ON journal(vault_id, seq);
+CREATE INDEX IF NOT EXISTS idx_blobs_vault_seq ON blobs(vault_id, seq);

@@ -17,6 +17,9 @@ pub fn run() {
                 .build(),
         )
         .setup(|app| {
+            if let Ok(dir) = app.path().app_data_dir() {
+                sync::init_install_id(&dir);
+            }
             app.manage(state::AppState::new());
             #[cfg(desktop)]
             {

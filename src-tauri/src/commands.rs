@@ -471,7 +471,14 @@ pub async fn configure_sync_server(
     state: State<'_, AppState>,
     mut config: crate::sync::SyncConfig,
 ) -> Result<crate::sync::SyncStatusDto, CommandError> {
-    config.vault_id = crate::sync::normalize_vault_id(&config.vault_id);
+    // An invalid id used to become "default" silently, merging two vaults.
+    let raw_vault_id = config.vault_id.trim().to_ascii_lowercase();
+    config.vault_id = crate::sync::normalize_vault_id(&raw_vault_id);
+    if !raw_vault_id.is_empty() && config.vault_id != raw_vault_id {
+        return Err(CommandError::InvalidFormat(
+            "el id del vault solo admite a-z, 0-9, _ y - (máximo 64)".into(),
+        ));
+    }
     if !config.server_url.trim().is_empty()
         && !crate::sync::is_allowed_server_url(&config.server_url)
     {
@@ -481,12 +488,15 @@ pub async fn configure_sync_server(
     }
     let mgr = ensure_sync_manager(&state, &app);
     let arc = state.vault.clone();
-    let config_clone = config.clone();
+    let mut config_clone = config.clone();
     let mgr_for_blocking = mgr.clone();
     let status = blocking(move || {
         let mut guard = lock(&arc)?;
         let h = guard.as_mut().ok_or(CommandError::VaultClosed)?;
         let prev = crate::sync::load_sync_config(&h.vault.root);
+        // The device identity is the app's, not the form's.
+        config_clone.device_id = prev.device_id.clone();
+        config_clone.bound_to = prev.bound_to.clone();
         let prev_vault_id = crate::sync::normalize_vault_id(&prev.vault_id);
         let server_changed = prev.server_url.trim() != config_clone.server_url.trim();
         let vault_changed = prev_vault_id != config_clone.vault_id;
@@ -634,7 +644,8 @@ pub(crate) fn list_folders_impl(h: &VaultHandle) -> Result<Vec<FolderDto>, Comma
                 pending.push(entry.path());
                 if let Ok(rel) = entry.path().strip_prefix(&h.vault.root) {
                     folders.push(FolderDto {
-                        path: rel.to_string_lossy().replace('\\', "/"),
+                        path: notium_core::paths::nfc(&rel.to_string_lossy().replace('\\', "/"))
+                            .into_owned(),
                     });
                 }
             }
@@ -691,12 +702,14 @@ fn delete_folder_impl(
     let affected = h.vault.delete_folder(&clean, keep_content)?;
     if !keep_content {
         let now = vault::now_ts().parse::<u64>().unwrap_or(0);
+        let mut deleted = Vec::new();
         for rec in existing_notes {
             if !rec.tombstoned && rec.path.starts_with(&prefix) {
                 let _ = h.index.mark_tombstoned(&rec.note_id);
-                let _ = crate::sync::journal_local_delete(h, &rec.note_id, now);
+                deleted.push(rec.note_id);
             }
         }
+        let _ = crate::sync::journal_deletes_unless_still_present(h, &deleted, now);
     }
     h.index
         .reconcile(&h.vault)
@@ -1534,14 +1547,12 @@ pub(crate) fn create_impl(
 
     let sync_config = crate::sync::load_sync_config(&h.vault.root);
     let now = vault::now_ts().parse::<u64>().unwrap_or(0);
-    let op = sync::local_create_op(
-        &sync_config.device_id,
-        &id,
-        bytes.clone(),
-        clock::Hlc { ts: now, cnt: 0 },
-        now,
-    )
-    .with_path(&rel_path);
+    let hlc = h
+        .sync
+        .tick_hlc(now)
+        .map_err(|e| CommandError::Sql(e.to_string()))?;
+    let op = sync::local_create_op(&sync_config.device_id, &id, bytes.clone(), hlc, now)
+        .with_path(&rel_path);
     let _ = h.sync.claim_path(&op);
     let _ = h.sync.append_journal(&op);
 
@@ -1583,7 +1594,7 @@ fn read_impl(h: &VaultHandle, note_id: &str) -> Result<NoteContentDto, CommandEr
     })
 }
 
-fn save_impl(
+pub(crate) fn save_impl(
     h: &mut VaultHandle,
     note_id: &str,
     content: &str,
@@ -1636,18 +1647,29 @@ fn save_impl(
 
     let new_rev = current_rev + 1;
     let now = vault::now_ts().parse::<u64>().unwrap_or(0);
+    let base_hash = h
+        .sync
+        .get_current(note_id)
+        .map_err(|e| CommandError::Sql(e.to_string()))?
+        .map(|(_, hash)| hash)
+        .unwrap_or_default();
     h.sync
         .set_current(note_id, new_rev, Some(&bytes))
         .map_err(|e| CommandError::Sql(e.to_string()))?;
     let sync_config = crate::sync::load_sync_config(&h.vault.root);
+    let hlc = h
+        .sync
+        .tick_hlc(now)
+        .map_err(|e| CommandError::Sql(e.to_string()))?;
     let op = sync::local_update_op(
         &sync_config.device_id,
         note_id,
         current_rev,
         bytes,
-        clock::Hlc { ts: now, cnt: 0 },
+        hlc,
         now,
-    );
+    )
+    .with_base(&base_hash);
     h.sync
         .append_journal(&op)
         .map_err(|e| CommandError::Sql(e.to_string()))?;
@@ -1728,7 +1750,7 @@ fn move_impl(
     to_summary(h, &rec2)
 }
 
-fn delete_impl(h: &mut VaultHandle, note_id: &str) -> Result<(), CommandError> {
+pub(crate) fn delete_impl(h: &mut VaultHandle, note_id: &str) -> Result<(), CommandError> {
     let rec = h
         .index
         .get_note(note_id)
@@ -1742,7 +1764,7 @@ fn delete_impl(h: &mut VaultHandle, note_id: &str) -> Result<(), CommandError> {
         .mark_tombstoned(note_id)
         .map_err(|e| CommandError::Sql(e.to_string()))?;
     let now = vault::now_ts().parse::<u64>().unwrap_or(0);
-    crate::sync::journal_local_delete(h, note_id, now)?;
+    crate::sync::journal_deletes_unless_still_present(h, &[note_id.to_string()], now)?;
     Ok(())
 }
 
@@ -2028,25 +2050,28 @@ fn repair_links_impl(
                 total_updated += count;
 
                 let now = vault::now_ts().parse::<u64>().unwrap_or(0);
-                let current_rev = h
+                let (current_rev, base_hash) = h
                     .sync
                     .get_current(&note_id)
                     .ok()
                     .flatten()
-                    .map(|(r, _)| r)
-                    .unwrap_or(0);
+                    .unwrap_or_default();
                 let new_rev = current_rev + 1;
                 let _ = h
                     .sync
                     .set_current(&note_id, new_rev, Some(rewritten.as_bytes()));
+                let Ok(hlc) = h.sync.tick_hlc(now) else {
+                    continue;
+                };
                 let op = sync::local_update_op(
-                    "local",
+                    &crate::sync::load_sync_config(&h.vault.root).device_id,
                     &note_id,
                     current_rev,
                     rewritten.as_bytes().to_vec(),
-                    clock::Hlc { ts: now, cnt: 0 },
+                    hlc,
                     now,
-                );
+                )
+                .with_base(&base_hash);
                 let _ = h.sync.append_journal(&op);
             }
         }

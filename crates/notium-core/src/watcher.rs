@@ -55,7 +55,10 @@ mod imp {
                             let mut paths = Vec::new();
                             for p in pending.drain(..) {
                                 if let Ok(rel) = p.strip_prefix(&root) {
-                                    let s = rel.to_string_lossy().replace('\\', "/");
+                                    let s = crate::paths::nfc(
+                                        &rel.to_string_lossy().replace('\\', "/"),
+                                    )
+                                    .into_owned();
                                     if s.is_empty() || s.starts_with(".app/") {
                                         continue;
                                     }

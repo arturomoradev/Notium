@@ -9,6 +9,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
 use crate::clock::{self, Hlc};
+use crate::frontmatter;
 use crate::hash;
 use crate::vault::LocalVault;
 
@@ -54,6 +55,11 @@ pub struct Op {
     /// Older peers see a plain delete of an already deleted note.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub purge: bool,
+    /// Hash of the content this op was built on: identifies the merge base
+    /// across devices, where `base_rev` numbers can collide. Absent on ops
+    /// from older peers, which fall back to `base_rev`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_hash: Option<String>,
 }
 
 impl Op {
@@ -62,13 +68,42 @@ impl Op {
         self.path = Some(path.into());
         self
     }
+
+    /// Name the content this op was built on (`hash` of the current content;
+    /// an empty hash, a deleted note, names none).
+    pub fn with_base(mut self, hash: &str) -> Op {
+        self.base_hash = (!hash.is_empty()).then(|| hash.to_string());
+        self
+    }
 }
 
-/// Total order of path changes: the HLC, then the device id as tie-break.
-fn path_stamp(op: &Op) -> String {
-    // Zero-padded so the string order matches the numeric order.
-    format!("{:020}:{:010}:{}", op.hlc.ts, op.hlc.cnt, op.device_id)
+/// Total order of ops (path changes, concurrent contents): the HLC, then the
+/// device id as tie-break.
+pub fn op_stamp(op: &Op) -> String {
+    stamp_of(&op.hlc, &op.device_id)
 }
+
+fn stamp_of(hlc: &Hlc, device_id: &str) -> String {
+    // Zero-padded so the string order matches the numeric order.
+    format!("{:020}:{:010}:{}", hlc.ts, hlc.cnt, device_id)
+}
+
+/// Parse the `ts:cnt` prefix of a stamp or a stored clock.
+fn parse_hlc(s: &str) -> Option<Hlc> {
+    let mut it = s.splitn(3, ':');
+    Some(Hlc {
+        ts: it.next()?.parse().ok()?,
+        cnt: it.next()?.parse().ok()?,
+    })
+}
+
+/// Remote clocks further ahead than this are not adopted (see `observe_hlc`).
+pub const MAX_CLOCK_SKEW_SECS: u64 = 24 * 60 * 60;
+
+/// How long a past note content is kept as a possible merge base (see
+/// `SyncDb::maybe_prune`): edits made offline for longer than this conflict
+/// into a copy instead of merging line by line.
+pub const CONTENT_RETENTION_SECS: u64 = 30 * 24 * 60 * 60;
 
 /// Outcome of applying a remote op to a device.
 #[derive(Clone, Debug, PartialEq)]
@@ -160,6 +195,26 @@ CREATE TABLE IF NOT EXISTS synced_blobs (
   path TEXT NOT NULL,
   PRIMARY KEY (hash, path)
 );
+-- Every note content seen (local saves, remote ops, merges), by hash: merge
+-- bases are found by hash, and `stamp` orders concurrent versions.
+CREATE TABLE IF NOT EXISTS contents (
+  note_id TEXT NOT NULL,
+  hash TEXT NOT NULL,
+  content BLOB NOT NULL,
+  stamp TEXT NOT NULL DEFAULT '',
+  seen_at INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (note_id, hash)
+);
+-- Remote ops already applied: re-delivered ops are skipped.
+CREATE TABLE IF NOT EXISTS applied_ops (
+  op_id TEXT PRIMARY KEY
+);
+-- Remote ops that failed to apply (e.g. a locked file), retried next cycle in order.
+CREATE TABLE IF NOT EXISTS deferred_ops (
+  op_id TEXT PRIMARY KEY,
+  note_id TEXT NOT NULL,
+  op TEXT NOT NULL
+);
 "#;
 
 /// Per-device sync state backed by `.app/sync.db`.
@@ -171,31 +226,33 @@ impl SyncDb {
     pub fn open(path: &Path) -> rusqlite::Result<SyncDb> {
         let conn = Connection::open(path)?;
         crate::index::configure_connection(&conn)?;
-        conn.execute_batch(SYNC_SCHEMA)?;
-        let _ = conn.execute(
-            "ALTER TABLE journal ADD COLUMN synced INTEGER NOT NULL DEFAULT 0",
-            [],
-        );
-        let _ = conn.execute("ALTER TABLE journal ADD COLUMN path TEXT", []);
-        let _ = conn.execute(
-            "ALTER TABLE journal ADD COLUMN purge INTEGER NOT NULL DEFAULT 0",
-            [],
-        );
-        Ok(SyncDb { conn })
+        Self::migrate(conn)
     }
 
     pub fn open_in_memory() -> rusqlite::Result<SyncDb> {
-        let conn = Connection::open_in_memory()?;
+        Self::migrate(Connection::open_in_memory()?)
+    }
+
+    fn migrate(conn: Connection) -> rusqlite::Result<SyncDb> {
         conn.execute_batch(SYNC_SCHEMA)?;
+        // Columns added after the first release; "duplicate column" errors are expected.
+        for col in [
+            "synced INTEGER NOT NULL DEFAULT 0",
+            "path TEXT",
+            "purge INTEGER NOT NULL DEFAULT 0",
+            "base_hash TEXT",
+        ] {
+            let _ = conn.execute(&format!("ALTER TABLE journal ADD COLUMN {col}"), []);
+        }
         let _ = conn.execute(
-            "ALTER TABLE journal ADD COLUMN synced INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE contents ADD COLUMN seen_at INTEGER NOT NULL DEFAULT 0",
             [],
         );
-        let _ = conn.execute("ALTER TABLE journal ADD COLUMN path TEXT", []);
-        let _ = conn.execute(
-            "ALTER TABLE journal ADD COLUMN purge INTEGER NOT NULL DEFAULT 0",
+        // Rows from before `seen_at` start their retention now.
+        conn.execute(
+            "UPDATE contents SET seen_at = unixepoch() WHERE seen_at = 0",
             [],
-        );
+        )?;
         Ok(SyncDb { conn })
     }
 
@@ -209,15 +266,62 @@ impl SyncDb {
             .optional()
     }
 
+    /// Content of `note_id` at this device's `rev` (legacy merge base for ops
+    /// without `base_hash`). Older rows keep their own copy of the content.
     pub fn get_revision(&self, note_id: &str, rev: u64) -> rusqlite::Result<Option<Vec<u8>>> {
         self.conn
             .query_row(
-                "SELECT content FROM revisions WHERE note_id = ?1 AND rev = ?2",
+                "SELECT COALESCE(r.content, c.content) FROM revisions r
+                 LEFT JOIN contents c ON c.note_id = r.note_id AND c.hash = r.hash
+                 WHERE r.note_id = ?1 AND r.rev = ?2",
                 params![note_id, rev as i64],
                 |r| r.get::<_, Option<Vec<u8>>>(0),
             )
             .optional()
             .map(|o| o.flatten())
+    }
+
+    /// A content of `note_id` seen before, by hash.
+    pub fn content_by_hash(&self, note_id: &str, hash: &str) -> rusqlite::Result<Option<Vec<u8>>> {
+        self.conn
+            .query_row(
+                "SELECT content FROM contents WHERE note_id = ?1 AND hash = ?2",
+                params![note_id, hash],
+                |r| r.get(0),
+            )
+            .optional()
+    }
+
+    /// Stamp (see `op_stamp`) of the newest op known to have produced this content;
+    /// empty when unknown.
+    pub fn content_stamp(&self, note_id: &str, hash: &str) -> rusqlite::Result<String> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT stamp FROM contents WHERE note_id = ?1 AND hash = ?2",
+                params![note_id, hash],
+                |r| r.get(0),
+            )
+            .optional()?
+            .unwrap_or_default())
+    }
+
+    /// Remember a content of `note_id`, keeping the highest stamp seen for it.
+    pub fn remember_content(
+        &mut self,
+        note_id: &str,
+        content: &[u8],
+        stamp: &str,
+    ) -> rusqlite::Result<String> {
+        let h = hash::content_hash(content);
+        self.conn.execute(
+            "INSERT INTO contents (note_id, hash, content, stamp, seen_at)
+             VALUES (?1,?2,?3,?4,unixepoch())
+             ON CONFLICT (note_id, hash)
+             DO UPDATE SET stamp = max(stamp, excluded.stamp), seen_at = excluded.seen_at",
+            params![note_id, h, content, stamp],
+        )?;
+        Ok(h)
     }
 
     /// Record a revision snapshot (the content at `rev`) and update the current pointer.
@@ -227,10 +331,13 @@ impl SyncDb {
         rev: u64,
         content: Option<&[u8]>,
     ) -> rusqlite::Result<()> {
-        let h = content.map(hash::content_hash).unwrap_or_default();
+        let h = match content {
+            Some(c) => self.remember_content(note_id, c, "")?,
+            None => String::new(),
+        };
         self.conn.execute(
-            "INSERT OR REPLACE INTO revisions (note_id, rev, content, hash) VALUES (?1,?2,?3,?4)",
-            params![note_id, rev as i64, content, h],
+            "INSERT OR REPLACE INTO revisions (note_id, rev, content, hash) VALUES (?1,?2,NULL,?3)",
+            params![note_id, rev as i64, h],
         )?;
         self.conn.execute(
             "INSERT OR REPLACE INTO current (note_id, rev, hash) VALUES (?1,?2,?3)",
@@ -240,9 +347,12 @@ impl SyncDb {
     }
 
     pub fn append_journal(&mut self, op: &Op) -> rusqlite::Result<()> {
+        if let Some(content) = &op.content {
+            self.remember_content(&op.note_id, content, &op_stamp(op))?;
+        }
         self.conn.execute(
-            "INSERT OR REPLACE INTO journal (op_id, device_id, note_id, kind, base_rev, new_rev, content, hlc_ts, hlc_cnt, ts, path, purge)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
+            "INSERT OR REPLACE INTO journal (op_id, device_id, note_id, kind, base_rev, new_rev, content, hlc_ts, hlc_cnt, ts, path, purge, base_hash)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
             params![
                 op.op_id,
                 op.device_id,
@@ -255,10 +365,117 @@ impl SyncDb {
                 op.hlc.cnt as i64,
                 op.ts as i64,
                 op.path,
-                op.purge as i64
+                op.purge as i64,
+                op.base_hash
             ],
         )?;
         Ok(())
+    }
+
+    /// Whether `op_id` was journaled here or already applied: such an op
+    /// arriving from the server is skipped (re-delivery, or our own op after
+    /// the device id changed).
+    pub fn is_known_op(&self, op_id: &str) -> rusqlite::Result<bool> {
+        self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM journal WHERE op_id = ?1)
+                 OR EXISTS(SELECT 1 FROM applied_ops WHERE op_id = ?1)",
+            params![op_id],
+            |r| r.get(0),
+        )
+    }
+
+    pub fn mark_applied(&mut self, op_id: &str) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO applied_ops (op_id) VALUES (?1)",
+            params![op_id],
+        )?;
+        Ok(())
+    }
+
+    /// Queue a remote op that could not be applied, to retry it next cycle.
+    pub fn defer_op(&mut self, op: &Op) -> rusqlite::Result<()> {
+        let json = serde_json::to_string(op).map_err(rusqlite_err)?;
+        self.conn.execute(
+            "INSERT OR REPLACE INTO deferred_ops (op_id, note_id, op) VALUES (?1,?2,?3)",
+            params![op.op_id, op.note_id, json],
+        )?;
+        Ok(())
+    }
+
+    /// Take every deferred op out of the queue, oldest first.
+    pub fn take_deferred_ops(&mut self) -> rusqlite::Result<Vec<Op>> {
+        let ops: Vec<String> = self
+            .conn
+            .prepare("SELECT op FROM deferred_ops ORDER BY rowid")?
+            .query_map([], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        self.conn.execute("DELETE FROM deferred_ops", [])?;
+        Ok(ops
+            .iter()
+            .filter_map(|j| serde_json::from_str(j).ok())
+            .collect())
+    }
+
+    pub fn deferred_count(&self) -> rusqlite::Result<usize> {
+        self.conn
+            .query_row("SELECT COUNT(*) FROM deferred_ops", [], |r| {
+                r.get::<_, i64>(0)
+            })
+            .map(|n| n as usize)
+    }
+
+    /// Stamp of the newest local op with content for `note_id` (fallback order
+    /// for contents recorded before stamps existed).
+    pub fn latest_local_stamp(&self, note_id: &str) -> rusqlite::Result<String> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT hlc_ts, hlc_cnt, device_id FROM journal
+                 WHERE note_id = ?1 AND kind <> 'delete' ORDER BY rowid DESC LIMIT 1",
+                params![note_id],
+                |r| {
+                    Ok(stamp_of(
+                        &Hlc {
+                            ts: r.get::<_, i64>(0)? as u64,
+                            cnt: r.get::<_, i64>(1)? as u32,
+                        },
+                        &r.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .optional()?
+            .unwrap_or_default())
+    }
+
+    /// This device's clock for a new local op at wall time `now` (Unix
+    /// seconds): never behind any op seen, so a device whose clock is late
+    /// still orders its later edits after what it already received.
+    pub fn tick_hlc(&mut self, now: u64) -> rusqlite::Result<Hlc> {
+        let next = self.stored_hlc()?.tick(now);
+        self.store_hlc(next)?;
+        Ok(next)
+    }
+
+    /// Advance the clock past a remote op's HLC. Stamps more than a day in the
+    /// future (a device with a wrong clock) are ignored so they cannot drag
+    /// every clock along.
+    pub fn observe_hlc(&mut self, remote: Hlc, now: u64) -> rusqlite::Result<()> {
+        let cur = self.stored_hlc()?;
+        if remote.ts <= now + MAX_CLOCK_SKEW_SECS && remote.key() > cur.key() {
+            self.store_hlc(remote)?;
+        }
+        Ok(())
+    }
+
+    fn stored_hlc(&self) -> rusqlite::Result<Hlc> {
+        Ok(self
+            .get_meta("hlc")?
+            .and_then(|s| parse_hlc(&s))
+            .unwrap_or_else(Hlc::origin))
+    }
+
+    fn store_hlc(&mut self, hlc: Hlc) -> rusqlite::Result<()> {
+        self.set_meta("hlc", &format!("{}:{}", hlc.ts, hlc.cnt))
     }
 
     pub fn tombstone(&mut self, note_id: &str, ts: u64) -> rusqlite::Result<()> {
@@ -297,9 +514,10 @@ impl SyncDb {
     }
 
     pub fn get_unpushed_ops(&self) -> rusqlite::Result<Vec<Op>> {
+        // Journal order: two ops stamped in the same second keep the order they happened in.
         let mut stmt = self.conn.prepare(
-            "SELECT op_id, device_id, note_id, kind, base_rev, new_rev, content, hlc_ts, hlc_cnt, ts, path, purge
-             FROM journal WHERE synced = 0 ORDER BY hlc_ts ASC, hlc_cnt ASC, ts ASC",
+            "SELECT op_id, device_id, note_id, kind, base_rev, new_rev, content, hlc_ts, hlc_cnt, ts, path, purge, base_hash
+             FROM journal WHERE synced = 0 ORDER BY rowid",
         )?;
         let rows = stmt.query_map([], |r| {
             let kind_str: String = r.get(3)?;
@@ -323,6 +541,7 @@ impl SyncDb {
                 ts: r.get::<_, i64>(9)? as u64,
                 path: r.get(10)?,
                 purge: r.get::<_, i64>(11)? != 0,
+                base_hash: r.get(12)?,
             })
         })?;
         let mut ops = Vec::new();
@@ -377,7 +596,7 @@ impl SyncDb {
             return Ok(false);
         }
         let key = format!("path_stamp:{}", op.note_id);
-        let stamp = path_stamp(op);
+        let stamp = op_stamp(op);
         if self.get_meta(&key)?.is_some_and(|current| current >= stamp) {
             return Ok(false);
         }
@@ -388,18 +607,13 @@ impl SyncDb {
     /// HLC for a new local path change of `note_id` at wall time `now`: later
     /// than the last recorded change, so two renames in the same second still
     /// order correctly on every device.
-    pub fn next_path_hlc(&self, note_id: &str, now: u64) -> rusqlite::Result<Hlc> {
+    pub fn next_path_hlc(&mut self, note_id: &str, now: u64) -> rusqlite::Result<Hlc> {
         let last = self
             .get_meta(&format!("path_stamp:{note_id}"))?
-            .and_then(|s| {
-                let mut it = s.splitn(3, ':');
-                Some(Hlc {
-                    ts: it.next()?.parse().ok()?,
-                    cnt: it.next()?.parse().ok()?,
-                })
-            })
+            .and_then(|s| parse_hlc(&s))
             .unwrap_or_else(Hlc::origin);
-        Ok(last.tick(now))
+        self.observe_hlc(last, u64::MAX / 2)?;
+        self.tick_hlc(now)
     }
 
     pub fn is_blob_synced(&self, hash: &str, path: &str) -> rusqlite::Result<bool> {
@@ -417,6 +631,49 @@ impl SyncDb {
             params![hash, path],
         )?;
         Ok(())
+    }
+
+    /// Drop history no longer needed, at most once a day (`last_prune` meta):
+    /// contents not seen for [`CONTENT_RETENTION_SECS`] (except each note's
+    /// current one), the bodies of pushed journal ops that old, and the legacy
+    /// per-revision copies (`contents` holds them now). A merge whose base was
+    /// dropped conflicts into a copy instead of merging; nothing is lost.
+    /// `applied_ops` is kept: a server or vault change re-pulls every op, and
+    /// it is what stops old ops being applied again. Returns whether it ran.
+    pub fn maybe_prune(&mut self, now: u64) -> rusqlite::Result<bool> {
+        let last = self
+            .get_meta("last_prune")?
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(0);
+        if now < last + 24 * 60 * 60 {
+            return Ok(false);
+        }
+        let cutoff = now.saturating_sub(CONTENT_RETENTION_SECS) as i64;
+        self.conn.execute(
+            "DELETE FROM contents WHERE seen_at < ?1 AND NOT EXISTS (
+               SELECT 1 FROM current c WHERE c.note_id = contents.note_id AND c.hash = contents.hash)",
+            params![cutoff],
+        )?;
+        self.conn.execute(
+            "UPDATE journal SET content = NULL
+             WHERE synced = 1 AND content IS NOT NULL AND hlc_ts < ?1",
+            params![cutoff],
+        )?;
+        self.conn.execute(
+            "UPDATE revisions SET content = NULL WHERE content IS NOT NULL",
+            [],
+        )?;
+        self.set_meta("last_prune", &now.to_string())?;
+        let (pages, free): (i64, i64) = self.conn.query_row(
+            "SELECT (SELECT page_count FROM pragma_page_count()),
+                    (SELECT freelist_count FROM pragma_freelist_count())",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        if free * 4 > pages {
+            self.conn.execute_batch("VACUUM")?;
+        }
+        Ok(true)
     }
 
     pub fn clear_synced_blobs(&mut self) -> rusqlite::Result<()> {
@@ -439,6 +696,7 @@ pub fn local_create_op(device_id: &str, note_id: &str, content: Vec<u8>, hlc: Hl
         ts,
         path: None,
         purge: false,
+        base_hash: None,
     }
 }
 
@@ -456,6 +714,7 @@ pub fn local_delete_op(device_id: &str, note_id: &str, current_rev: u64, hlc: Hl
         ts,
         path: None,
         purge: false,
+        base_hash: None,
     }
 }
 
@@ -488,111 +747,199 @@ pub fn local_update_op(
         ts,
         path: None,
         purge: false,
+        base_hash: None,
     }
+}
+
+/// The losing version of a conflicting note, saved as a note of its own (with
+/// its own id) next to the original. Every device that sees the same conflict
+/// derives the same id, path and content, so the copies converge.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ConflictCopy {
+    pub note_id: String,
+    pub path: String,
+    pub content: Vec<u8>,
 }
 
 /// Apply a remote op to a device using 3-way Markdown merge.
 ///
-/// `_format` is `"markdown"`; `path` is the note's vault-relative path.
-#[allow(clippy::too_many_arguments)]
+/// `format` is `"markdown"`; `path` is the note's vault-relative path.
 pub fn apply_remote(
+    db: &mut SyncDb,
+    vault: &LocalVault,
+    op: &Op,
+    format: &str,
+    path: &str,
+) -> rusqlite::Result<ApplyOutcome> {
+    apply_remote_ex(db, vault, op, format, path).map(|(outcome, _)| outcome)
+}
+
+/// `apply_remote`, also returning the conflict copy it wrote, if any.
+pub fn apply_remote_ex(
     db: &mut SyncDb,
     vault: &LocalVault,
     op: &Op,
     _format: &str,
     path: &str,
-) -> rusqlite::Result<ApplyOutcome> {
+) -> rusqlite::Result<(ApplyOutcome, Option<ConflictCopy>)> {
     let cur = db.get_current(&op.note_id)?;
 
-    // Deletion handling
     if op.kind == OpKind::Delete {
-        return match cur {
+        let outcome = match cur {
             Some((local_rev, _)) => {
-                if op.base_rev == local_rev {
+                // The delete applies only to the version it was made on; a
+                // concurrent local edit keeps the note (`DeleteConflict`).
+                let unchanged = match (vault.read(path).ok(), &op.base_hash) {
+                    (None, _) => true,
+                    (Some(mine), Some(base)) => hash::content_hash(&mine) == *base,
+                    (Some(_), None) => op.base_rev == local_rev,
+                };
+                if unchanged {
                     let _ = vault.delete_to_trash(path);
                     db.tombstone(&op.note_id, op.ts)?;
-                    db.set_current(&op.note_id, op.new_rev, None)?;
-                    Ok(ApplyOutcome::Deleted)
+                    db.set_current(&op.note_id, local_rev.max(op.new_rev), None)?;
+                    ApplyOutcome::Deleted
                 } else {
-                    Ok(ApplyOutcome::DeleteConflict)
+                    ApplyOutcome::DeleteConflict
                 }
             }
             None => {
                 db.tombstone(&op.note_id, op.ts)?;
                 db.set_current(&op.note_id, op.new_rev, None)?;
-                Ok(ApplyOutcome::Deleted)
+                ApplyOutcome::Deleted
             }
         };
+        return Ok((outcome, None));
     }
 
-    // Content op
     let Some(content) = &op.content else {
-        return Ok(ApplyOutcome::Noop);
+        return Ok((ApplyOutcome::Noop, None));
     };
-    let content = content.clone();
+    // Kept even when rejected below: a later op may name it as its base.
+    let theirs_hash = db.remember_content(&op.note_id, content, &op_stamp(op))?;
 
-    match cur {
-        None => {
-            if db.is_tombstoned(&op.note_id)? {
-                return Ok(ApplyOutcome::RejectedTombstone);
-            }
-            vault.write_atomic(path, &content).map_err(rusqlite_err)?;
-            db.set_current(&op.note_id, op.new_rev, Some(&content))?;
-            Ok(ApplyOutcome::Created)
+    let Some((local_rev, local_hash)) = cur else {
+        if db.is_tombstoned(&op.note_id)? {
+            return Ok((ApplyOutcome::RejectedTombstone, None));
         }
-        Some((local_rev, local_hash)) => {
-            // Reject stale pushes against a tombstoned note (no resurrection).
-            if db.is_tombstoned(&op.note_id)? && op.base_rev < local_rev {
-                return Ok(ApplyOutcome::RejectedTombstone);
-            }
-            let mine = vault.read(path).map_err(rusqlite_err)?;
-            let mine_hash = hash::content_hash(&mine);
-            // Detect an external disk edit (file differs from what sync.db recorded).
-            let external_edit = mine_hash != local_hash;
-
-            if !external_edit && local_hash == hash::content_hash(&content) {
-                // Already have this exact content
-                if op.new_rev > local_rev {
-                    db.set_current(&op.note_id, op.new_rev, Some(&content))?;
-                }
-                return Ok(ApplyOutcome::Noop);
-            }
-            if !external_edit && op.base_rev >= local_rev {
-                // Clean fast-forward (up to date, or server ahead).
-                vault.write_atomic(path, &content).map_err(rusqlite_err)?;
-                db.set_current(&op.note_id, op.new_rev, Some(&content))?;
-                return Ok(ApplyOutcome::FastForward);
-            }
-
-            // Merge path: either concurrent edits (base_rev < local_rev) or an
-            // external disk edit (never silently overwritten).
-            let mine_s = String::from_utf8_lossy(&mine).to_string();
-            let theirs_s = String::from_utf8_lossy(&content).to_string();
-
-            // markdown 3-way merge. Base = last synced content (for an external
-            // edit) or the content at op.base_rev (for a concurrent edit).
-            let base_rev = if external_edit {
-                local_rev
-            } else {
-                op.base_rev
-            };
-            let base = db
-                .get_revision(&op.note_id, base_rev)?
-                .map(|b| String::from_utf8_lossy(&b).to_string())
-                .unwrap_or_else(|| mine_s.clone());
-            let (merged, conflict) = merge::merge_md(&base, &mine_s, &theirs_s);
-            let merged_bytes = merged.as_bytes().to_vec();
-            vault
-                .write_atomic(path, &merged_bytes)
-                .map_err(rusqlite_err)?;
-            if conflict {
-                let copy = merge::conflict_copy_path(path, &op.device_id, op.ts);
-                vault.write_atomic(&copy, &content).map_err(rusqlite_err)?;
-            }
-            db.set_current(&op.note_id, op.new_rev, Some(&merged_bytes))?;
-            Ok(ApplyOutcome::Merged { conflict })
-        }
+        vault.write_atomic(path, content).map_err(rusqlite_err)?;
+        db.set_current(&op.note_id, op.new_rev, Some(content))?;
+        return Ok((ApplyOutcome::Created, None));
+    };
+    // Reject stale pushes against a tombstoned note (no resurrection).
+    if db.is_tombstoned(&op.note_id)? && op.base_rev < local_rev {
+        return Ok((ApplyOutcome::RejectedTombstone, None));
     }
+    let mine = vault.read(path).map_err(rusqlite_err)?;
+    let mine_hash = hash::content_hash(&mine);
+    let rev = local_rev.max(op.new_rev);
+    if mine_hash == theirs_hash {
+        db.set_current(&op.note_id, rev, Some(content))?;
+        return Ok((ApplyOutcome::Noop, None));
+    }
+    // A file that differs from what sync.db recorded was edited outside the app.
+    let external_edit = mine_hash != local_hash;
+    let fast_forward = match &op.base_hash {
+        Some(base) => *base == mine_hash,
+        None => !external_edit && op.base_rev >= local_rev,
+    };
+    if fast_forward {
+        vault.write_atomic(path, content).map_err(rusqlite_err)?;
+        db.set_current(&op.note_id, rev, Some(content))?;
+        return Ok((ApplyOutcome::FastForward, None));
+    }
+
+    // Concurrent edits. The base is the content the op was built on (by hash;
+    // revision numbers collide across devices); older ops name it by rev. An
+    // unknown base merges against nothing, which conflicts instead of letting
+    // one side silently overwrite the other.
+    let base_rev = if external_edit {
+        local_rev
+    } else {
+        op.base_rev
+    };
+    let base = match &op.base_hash {
+        Some(h) => db.content_by_hash(&op.note_id, h)?,
+        None => db.get_revision(&op.note_id, base_rev)?,
+    }
+    .map(|b| String::from_utf8_lossy(&b).into_owned())
+    .unwrap_or_default();
+    let mut mine_s = String::from_utf8_lossy(&mine).into_owned();
+    let mut theirs_s = String::from_utf8_lossy(content).into_owned();
+    align_updated(&mut mine_s, &mut theirs_s);
+    let (merged, conflict) = merge::merge_md(&base, &mine_s, &theirs_s);
+    if !conflict {
+        vault
+            .write_atomic(path, merged.as_bytes())
+            .map_err(rusqlite_err)?;
+        db.set_current(&op.note_id, rev, Some(merged.as_bytes()))?;
+        return Ok((ApplyOutcome::Merged { conflict: false }, None));
+    }
+
+    // Overlapping edits: the newest version stays in the note (the same choice
+    // on every device), the other goes to a conflict copy. A local version
+    // with no known stamp is a fresh edit on disk, so it stays.
+    let mut mine_stamp = db.content_stamp(&op.note_id, &mine_hash)?;
+    if mine_stamp.is_empty() {
+        mine_stamp = db.latest_local_stamp(&op.note_id)?;
+    }
+    let theirs_stamp = op_stamp(op);
+    let mine_wins = mine_stamp.is_empty() || mine_stamp > theirs_stamp;
+    let (winner, loser, loser_hash, loser_stamp) = if mine_wins {
+        (&mine, content, &theirs_hash, theirs_stamp)
+    } else {
+        (content, &mine, &mine_hash, mine_stamp)
+    };
+    let mut parts = loser_stamp.splitn(3, ':');
+    let loser_ts: u64 = parts.next().and_then(|t| t.parse().ok()).unwrap_or(0);
+    let loser_device = parts.nth(1).unwrap_or("device");
+    let seed = format!("{}/{loser_hash}", op.note_id);
+    let copy_id = format!("note_{}", &hash::content_hash(seed.as_bytes())[..32]);
+    let loser_text = String::from_utf8_lossy(loser);
+    let has_id = frontmatter::split(&loser_text)
+        .0
+        .is_some_and(|fm| frontmatter::notium_id(&fm).is_some());
+    let copy_text = if has_id {
+        frontmatter::upsert_field(&loser_text, "notium_id", &copy_id)
+    } else {
+        frontmatter::inject_notium_id(&loser_text, &copy_id)
+    };
+    let copy = ConflictCopy {
+        note_id: copy_id,
+        path: merge::conflict_copy_path(path, loser_device, loser_ts),
+        content: copy_text.into_bytes(),
+    };
+    if !mine_wins {
+        vault.write_atomic(path, winner).map_err(rusqlite_err)?;
+    }
+    vault
+        .write_atomic(&copy.path, &copy.content)
+        .map_err(rusqlite_err)?;
+    db.set_current(&op.note_id, rev, Some(winner))?;
+    Ok((ApplyOutcome::Merged { conflict: true }, Some(copy)))
+}
+
+/// Give both versions the later `updated:` frontmatter value, so the field
+/// every save rewrites does not make each pair of concurrent edits conflict.
+fn align_updated(a: &mut String, b: &mut String) {
+    let updated = |t: &str| {
+        frontmatter::split(t)
+            .0
+            .and_then(|fm| frontmatter::field(&fm, "updated"))
+    };
+    let (Some(x), Some(y)) = (updated(a), updated(b)) else {
+        return;
+    };
+    if x == y {
+        return;
+    }
+    let later = match (x.parse::<u64>(), y.parse::<u64>()) {
+        (Ok(nx), Ok(ny)) if nx >= ny => x,
+        (Ok(_), Ok(_)) => y,
+        _ => x.max(y),
+    };
+    *a = frontmatter::upsert_field(a, "updated", &later);
+    *b = frontmatter::upsert_field(b, "updated", &later);
 }
 
 fn rusqlite_err<E: std::fmt::Display>(e: E) -> rusqlite::Error {
@@ -732,6 +1079,38 @@ mod tests {
         db.append_journal(&delete).unwrap();
         assert!(db.has_delete_op("n1").unwrap());
         assert!(!db.has_delete_op("n2").unwrap());
+    }
+
+    #[test]
+    fn prune_drops_old_history_but_keeps_current_and_pending() {
+        let mut db = SyncDb::open_in_memory().unwrap();
+        let now: u64 = crate::vault::now_ts().parse().unwrap();
+        let old = local_create_op("dev1", "n1", b"v1".to_vec(), Hlc { ts: now, cnt: 0 }, now);
+        db.append_journal(&old).unwrap();
+        db.mark_ops_synced(&[&old.op_id]).unwrap();
+        db.set_current("n1", 1, Some(b"v2")).unwrap();
+        let pending = local_create_op("dev1", "n2", b"p".to_vec(), Hlc { ts: now, cnt: 1 }, now);
+        db.append_journal(&pending).unwrap();
+        db.mark_applied("remote-op").unwrap();
+
+        let later = now + CONTENT_RETENTION_SECS + 10;
+        assert!(db.maybe_prune(later).unwrap());
+        assert!(!db.maybe_prune(later + 60).unwrap(), "once a day");
+
+        let v1 = hash::content_hash(b"v1");
+        let v2 = hash::content_hash(b"v2");
+        assert!(db.content_by_hash("n1", &v1).unwrap().is_none());
+        assert_eq!(
+            db.content_by_hash("n1", &v2).unwrap().as_deref(),
+            Some(&b"v2"[..])
+        );
+        assert_eq!(
+            db.get_unpushed_ops().unwrap()[0].content.as_deref(),
+            Some(&b"p"[..])
+        );
+        assert!(db.is_known_op(&old.op_id).unwrap());
+        assert!(db.is_known_op("remote-op").unwrap());
+        assert!(!db.latest_local_stamp("n1").unwrap().is_empty());
     }
 
     #[test]

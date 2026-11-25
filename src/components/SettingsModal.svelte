@@ -812,7 +812,8 @@
                 id="sync-device-id"
                 type="text"
                 class="sync-input mono"
-                bind:value={deviceId}
+                value={deviceId}
+                readonly
               />
             </div>
           </div>

@@ -532,9 +532,11 @@ fn walk_files(dir: &Path) -> io::Result<Vec<PathBuf>> {
     }
     let mut stack = vec![dir.to_path_buf()];
     while let Some(d) = stack.pop() {
-        for entry in fs::read_dir(d)? {
-            let entry = entry?;
-            let path = entry.path();
+        let entries = fs::read_dir(d)?
+            .map(|e| e.map(|e| e.path()))
+            .collect::<io::Result<Vec<_>>>()?;
+        for path in entries.iter().cloned() {
+            let path = nfc_entry(path, &entries);
             if path.is_dir() {
                 stack.push(path);
             } else {
@@ -544,6 +546,28 @@ fn walk_files(dir: &Path) -> io::Result<Vec<PathBuf>> {
     }
     out.sort();
     Ok(out)
+}
+
+/// Give a file or folder its NFC name (see [`crate::paths::nfc`]) by renaming
+/// it, or on a filesystem that matches names in either form (macOS) by just
+/// using the NFC spelling. Left alone when another entry already has that name.
+fn nfc_entry(path: PathBuf, siblings: &[PathBuf]) -> PathBuf {
+    let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+        return path;
+    };
+    let normal = crate::paths::nfc(name);
+    if normal == name {
+        return path;
+    }
+    let target = path.with_file_name(&*normal);
+    if siblings.contains(&target) {
+        return path;
+    }
+    if target.exists() || fs::rename(&path, &target).is_ok() {
+        target
+    } else {
+        path
+    }
 }
 
 fn rel_path(root: &Path, abs: &Path) -> String {
@@ -837,6 +861,28 @@ impl LocalVault {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A file named in NFD (macOS) gets its NFC name, so every device sees one path.
+    #[test]
+    fn scan_renames_nfd_names_to_nfc() {
+        let dir = tempfile::tempdir().unwrap();
+        let v = LocalVault::new(dir.path());
+        v.init().unwrap();
+        let nfd_dir = v.root.join(NOTES_MD).join("Me\u{301}xico");
+        fs::create_dir_all(&nfd_dir).unwrap();
+        fs::write(nfd_dir.join("Cafe\u{301}.md"), "hola").unwrap();
+        let paths: Vec<String> = v
+            .scan_note_meta()
+            .unwrap()
+            .into_iter()
+            .map(|(m, _)| m.rel_path)
+            .collect();
+        assert_eq!(paths, vec!["notes/markdown/M\u{e9}xico/Caf\u{e9}.md"]);
+        assert_eq!(
+            v.read("notes/markdown/M\u{e9}xico/Caf\u{e9}.md").unwrap(),
+            b"hola"
+        );
+    }
 
     #[test]
     fn init_creates_layout_and_settings() {

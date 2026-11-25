@@ -71,6 +71,7 @@ export function sync(): Promise<void> {
 
 async function runSync(): Promise<void> {
   const { state } = vault;
+  let rejected = 0;
   status.state = "syncing";
   void emit("sync://status-changed", { ...status });
   try {
@@ -81,10 +82,15 @@ async function runSync(): Promise<void> {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ vault_id: vault.session.vaultId, device_id: deviceId, ops: sent }),
       });
-      const { accepted_op_ids } = (await res.json()) as { accepted_op_ids: string[] };
+      const { accepted_op_ids, rejected_op_ids = [] } = (await res.json()) as {
+        accepted_op_ids: string[];
+        rejected_op_ids?: string[];
+      };
       const accepted = new Set(accepted_op_ids);
       state.pending = state.pending.filter((op) => !accepted.has(op.op_id));
       await persist();
+      // Rejected ops stay queued; say so instead of looking synced.
+      if (rejected_op_ids.length) rejected = rejected_op_ids.length;
     }
     const changed: string[] = [];
     for (;;) {
@@ -103,8 +109,10 @@ async function runSync(): Promise<void> {
       if (done) break;
     }
     await persist();
-    status.state = "synced";
-    status.last_error = null;
+    status.state = rejected ? "error" : "synced";
+    status.last_error = rejected
+      ? `El servidor rechazó ${rejected} cambios (¿nota demasiado grande?); siguen pendientes`
+      : null;
     status.last_synced_at = Math.floor(Date.now() / 1000);
     if (changed.length) void emit("vault-changed", []);
   } catch (e) {

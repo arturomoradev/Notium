@@ -21,9 +21,9 @@ pub fn op_id() -> String {
     format!("op_{}", uuid::Uuid::now_v7().simple())
 }
 
-/// A Hybrid Logical Clock timestamp: `(ts, cnt)` where `ts` is millis since the
+/// A Hybrid Logical Clock timestamp: `(ts, cnt)` where `ts` is seconds since the
 /// Unix epoch (the maximum of wall clock and last-seen logical time) and `cnt`
-/// disambiguates events that share the same millisecond.
+/// disambiguates events that share the same second (every client stamps ops in Unix seconds).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct Hlc {
     pub ts: u64,
@@ -36,7 +36,7 @@ impl Hlc {
         Hlc { ts: 0, cnt: 0 }
     }
 
-    /// Advance this clock for a new local event at wall time `wall` (millis).
+    /// Advance this clock for a new local event at wall time `wall` (seconds).
     pub fn tick(&self, wall: u64) -> Self {
         if wall > self.ts {
             Hlc { ts: wall, cnt: 0 }

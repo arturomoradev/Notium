@@ -89,11 +89,12 @@ pub fn diff_lines(base: &[String], x: &[String]) -> Vec<Edit> {
     edits
 }
 
-/// Closed-interval overlap between two edit lists (inserts are points).
+/// Closed-interval overlap between two edit lists (inserts are points). The
+/// same edit made on both sides is not an overlap.
 fn edits_overlap(a: &[Edit], b: &[Edit]) -> bool {
     for x in a {
         for y in b {
-            if x.start.max(y.start) <= x.end.min(y.end) {
+            if x != y && x.start.max(y.start) <= x.end.min(y.end) {
                 return true;
             }
         }
@@ -122,21 +123,39 @@ fn apply_edits(base: &[String], edits: &[Edit]) -> Vec<String> {
 /// Returns `(merged, conflict)`. Disjoint edits auto-merge; any overlap produces a
 /// conservative whole-file conflict with git-style markers (both sides preserved
 /// verbatim). Identical concurrent edits are a clean no-op.
+///
+/// Line endings are compared as `\n`, so an editor that rewrote them all does
+/// not conflict with every edit; the result keeps whichever ending a side
+/// changed to (the same on every device, whichever side is "mine").
 pub fn merge_md(base: &str, mine: &str, theirs: &str) -> (String, bool) {
     if mine == theirs {
         return (mine.to_string(), false);
     }
-    let b = split_lines(base);
-    let m = split_lines(mine);
-    let t = split_lines(theirs);
+    let crlf = |s: &str| s.contains("\r\n");
+    let out_crlf = if crlf(mine) != crlf(base) {
+        crlf(mine)
+    } else {
+        crlf(theirs)
+    };
+    let lf = |s: &str| s.replace("\r\n", "\n");
+    let (base_lf, mine_lf, theirs_lf) = (lf(base), lf(mine), lf(theirs));
+    let b = split_lines(&base_lf);
+    let m = split_lines(&mine_lf);
+    let t = split_lines(&theirs_lf);
     let dm = diff_lines(&b, &m);
     let dt = diff_lines(&b, &t);
     if !edits_overlap(&dm, &dt) {
+        let theirs_only: Vec<Edit> = dt.into_iter().filter(|e| !dm.contains(e)).collect();
         let mut all = dm;
-        all.extend(dt);
+        all.extend(theirs_only);
         all.sort_by_key(|e| (e.start, e.end));
-        let out = apply_edits(&b, &all);
-        (join_lines(&out), false)
+        let out = join_lines(&apply_edits(&b, &all));
+        let out = if out_crlf {
+            out.replace('\n', "\r\n")
+        } else {
+            out
+        };
+        (out, false)
     } else {
         let mut out = String::from("<<<<<<< mine\n");
         out.push_str(mine);
@@ -229,6 +248,28 @@ mod tests {
         let (out, conflict) = merge_md(base, mine, theirs);
         assert!(!conflict);
         assert_eq!(out, "changed\n");
+    }
+
+    /// An editor that rewrote every line ending must not turn a one-line edit
+    /// from another device into a whole-file conflict.
+    #[test]
+    fn line_ending_change_does_not_conflict() {
+        let (out, conflict) = merge_md("a\nb\nc\n", "a\r\nb\r\nc\r\n", "a\nB\nc\n");
+        assert!(!conflict, "conflict:\n{out}");
+        assert_eq!(out, "a\r\nB\r\nc\r\n", "keeps mine's line endings");
+    }
+
+    /// Both sides making the very same change (the `updated:` field after a
+    /// save in the same second) is not a conflict.
+    #[test]
+    fn identical_edit_on_both_sides_merges() {
+        let (out, conflict) = merge_md(
+            "t: 1\n-\nx\ny\nz\n",
+            "t: 2\n-\nX\ny\nz\n",
+            "t: 2\n-\nx\ny\nZ\n",
+        );
+        assert!(!conflict, "conflict:\n{out}");
+        assert_eq!(out, "t: 2\n-\nX\ny\nZ\n");
     }
 
     #[test]

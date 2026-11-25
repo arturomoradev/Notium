@@ -1,6 +1,6 @@
 {
   "name": "notium",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Notium local-first Markdown note app",
   "type": "module",
   "scripts": {
@@ -17,6 +17,7 @@
     "build:web": "npm run build:wasm && vite build --config web/vite.config.ts",
     "check:web": "npm run build:wasm && svelte-check --tsconfig ./src/web/tsconfig.json",
     "test:web": "npm run build:wasm && node --disable-warning=ExperimentalWarning --experimental-strip-types --test tools/web-*.test.mjs",
+    "test:server": "node --disable-warning=ExperimentalWarning --experimental-strip-types --test tools/sync-server.test.mjs",
     "tauri": "tauri",
     "cloud:login": "cd server/cloudflare-sync && npx wrangler login",
     "cloud:setup": "cd server/cloudflare-sync && npx wrangler d1 create notium-db",

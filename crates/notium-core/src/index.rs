@@ -436,17 +436,35 @@ impl Index {
         type Assignment = (vault::NoteEntry, String, bool, Option<i64>, Option<String>);
         let mut assignments: Vec<Assignment> = Vec::new();
 
-        for (entry, mtime, cached) in notes {
-            // A cached file was last indexed clean: its embedded id is its row id.
-            let embedded = match &cached {
+        // A cached file was last indexed clean: its embedded id is its row id.
+        let embedded_ids: Vec<Option<String>> = notes
+            .iter()
+            .map(|(entry, _, cached)| match cached {
                 Some(id) => Some(id.clone()),
                 None => vault::extract_embedded_id(&entry.bytes, entry.editor),
-            };
+            })
+            .collect();
+        // When several files carry the same embedded id (a copied file, an old
+        // version restored next to the note), the file at the id's indexed path
+        // keeps it, so a copy that sorts first cannot take over the note.
+        let mut keepers: HashMap<String, String> = HashMap::new();
+        for ((entry, _, _), eid) in notes.iter().zip(&embedded_ids) {
+            if let Some(eid) = eid {
+                if existing.get(eid).is_some_and(|(p, _)| *p == entry.rel_path) {
+                    keepers.insert(eid.clone(), entry.rel_path.clone());
+                }
+            }
+        }
+
+        for ((entry, mtime, cached), embedded) in notes.into_iter().zip(embedded_ids) {
             let mut id;
             let mut collision = false;
             match &embedded {
                 Some(eid) => {
-                    if let Some(prev) = id_to_path.get(eid) {
+                    let taken = id_to_path
+                        .get(eid)
+                        .or_else(|| keepers.get(eid).filter(|p| **p != entry.rel_path));
+                    if let Some(prev) = taken {
                         report.collisions.push(Collision {
                             id: eid.clone(),
                             paths: vec![prev.clone(), entry.rel_path.clone()],

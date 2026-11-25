@@ -24,7 +24,7 @@ default = ["native"]
 # Filesystem vault, SQLite index/journal and watcher: everything the apps need.
 # Without it only the pure modules remain (extract, frontmatter, hash, links,
 # sync::merge, clock::Hlc), which is what crates/notium-wasm compiles for the web.
-native = ["dep:rusqlite", "dep:uuid", "dep:notify"]
+native = ["dep:rusqlite", "dep:uuid", "dep:notify", "dep:icu_normalizer"]
 
 [dependencies]
 pulldown-cmark = "0.13"
@@ -34,6 +34,8 @@ rusqlite = { version = "0.40", features = ["bundled"], optional = true }
 blake3 = "1"
 uuid = { version = "1", features = ["v7"], optional = true }
 thiserror = "2"
+# NFC file names (already in the app through Tauri; the web uses String.normalize).
+icu_normalizer = { version = "2", default-features = false, features = ["compiled_data"], optional = true }
 
 # Desktop-only filesystem watcher (Android and iOS use resume-reconcile instead).
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]

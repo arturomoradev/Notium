@@ -109,21 +109,72 @@ fn s3_md_conflict_markers_and_copy() {
         Hlc::origin().tick(1),
         1,
     );
-    let out = apply_remote(&mut db, &vault, &op, "markdown", "notes/markdown/A.md").unwrap();
+    let (out, copy) =
+        sync::apply_remote_ex(&mut db, &vault, &op, "markdown", "notes/markdown/A.md").unwrap();
     assert_eq!(out, ApplyOutcome::Merged { conflict: true });
 
+    // The local edit (never journaled: a fresh edit on disk) stays in the note,
+    // untouched and without markers; the remote one goes to a copy with its own id.
     let content = String::from_utf8(vault.read("notes/markdown/A.md").unwrap()).unwrap();
-    assert!(content.contains("<<<<<<< mine"));
-    assert!(content.contains("mine edit"));
-    assert!(content.contains("theirs edit"));
-    assert!(content.contains(">>>>>>> theirs"));
+    assert_eq!(content, mine);
 
-    let copy = merge::conflict_copy_path("notes/markdown/A.md", "devB", 1);
-    assert!(vault.exists(&copy), "conflict copy must exist");
+    let copy = copy.expect("conflict copy");
     assert_eq!(
-        vault.read(&copy).unwrap(),
-        "theirs edit\nline2\n".as_bytes()
+        copy.path,
+        merge::conflict_copy_path("notes/markdown/A.md", "devB", 1)
     );
+    let text = String::from_utf8(vault.read(&copy.path).unwrap()).unwrap();
+    assert!(text.contains("theirs edit\nline2\n"));
+    assert!(text.contains(&format!("notium_id: {}", copy.note_id)));
+    assert_ne!(copy.note_id, "note_a");
+}
+
+#[test]
+fn s3b_newer_remote_version_wins_a_conflict() {
+    let (_d, vault, mut db) = device();
+    let base = "line1\nline2\n";
+    vault
+        .write_atomic("notes/markdown/A.md", base.as_bytes())
+        .unwrap();
+    db.set_current("note_a", 0, Some(base.as_bytes())).unwrap();
+    // A journaled local edit stamped at t=5.
+    let mine = local_update_op(
+        "devA",
+        "note_a",
+        0,
+        b"mine edit\nline2\n".to_vec(),
+        Hlc { ts: 5, cnt: 0 },
+        5,
+    );
+    db.append_journal(&mine).unwrap();
+    vault
+        .write_atomic("notes/markdown/A.md", b"mine edit\nline2\n")
+        .unwrap();
+    db.set_current("note_a", 1, Some(b"mine edit\nline2\n"))
+        .unwrap();
+
+    let theirs = local_update_op(
+        "devB",
+        "note_a",
+        0,
+        b"theirs edit\nline2\n".to_vec(),
+        Hlc { ts: 9, cnt: 0 },
+        9,
+    );
+    let (_, copy) =
+        sync::apply_remote_ex(&mut db, &vault, &theirs, "markdown", "notes/markdown/A.md").unwrap();
+    assert_eq!(
+        vault.read("notes/markdown/A.md").unwrap(),
+        b"theirs edit\nline2\n"
+    );
+    let copy = copy.unwrap();
+    assert_eq!(
+        copy.path,
+        merge::conflict_copy_path("notes/markdown/A.md", "devA", 5)
+    );
+    assert!(String::from_utf8(copy.content)
+        .unwrap()
+        .contains("mine edit"));
 }
 
 #[test]
@@ -220,6 +271,7 @@ fn s8_delete_vs_update_keeps_file() {
         ts: 1,
         path: None,
         purge: false,
+        base_hash: None,
     };
     let out = apply_remote(&mut db, &vault, &op, "markdown", "notes/markdown/A.md").unwrap();
     assert_eq!(out, ApplyOutcome::DeleteConflict);
@@ -248,6 +300,7 @@ fn s9_no_resurrection_from_stale_push() {
         ts: 1,
         path: None,
         purge: false,
+        base_hash: None,
     };
     assert_eq!(
         apply_remote(&mut db, &vault, &del, "markdown", "notes/markdown/A.md").unwrap(),
