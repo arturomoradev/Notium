@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-vault-list-folders"
+description = "Enables the vault_list_folders command without any pre-configured scope."
+commands.allow = ["vault_list_folders"]
+
+[[permission]]
+identifier = "deny-vault-list-folders"
+description = "Denies the vault_list_folders command without any pre-configured scope."
+commands.deny = ["vault_list_folders"]

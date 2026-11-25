@@ -1,0 +1,41 @@
+{
+  "note_id": "note_external",
+  "title": "Plain note",
+  "editor": "markdown",
+  "meta": {
+    "created_at": null,
+    "updated_at": null,
+    "tags": []
+  },
+  "plain_text": "Plain note\nJust a note with no notium metadata at all.\n[[Linked]]",
+  "tags": [],
+  "out_links": [
+    {
+      "text": "Linked",
+      "kind": "wikilink",
+      "target": "Linked",
+      "is_attachment": false
+    }
+  ],
+  "attachment_refs": [],
+  "chunks": [
+    {
+      "chunk_id": "a88d8cb31fe33509735dac6a91f5c35f",
+      "kind": "heading",
+      "heading_path": "Plain note",
+      "body": "Plain note"
+    },
+    {
+      "chunk_id": "c2fabb761d50dbf89ed45897746dc411",
+      "kind": "paragraph",
+      "heading_path": "Plain note",
+      "body": "Just a note with no notium metadata at all."
+    },
+    {
+      "chunk_id": "be17f291dab686052917f51ffdaebb3c",
+      "kind": "list",
+      "heading_path": "Plain note",
+      "body": "[[Linked]]"
+    }
+  ]
+}

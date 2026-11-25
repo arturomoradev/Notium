@@ -1,0 +1,13 @@
+dist/
+target/
+node_modules/
+reference/
+src-tauri/gen/
+src-tauri/target/
+package-lock.json
+server/cloudflare-sync/package-lock.json
+crates/notium-core/tests/fixtures/
+docs/
+*.md
+dist-web/
+src/web/wasm/pkg/

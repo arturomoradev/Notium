@@ -1,0 +1,13 @@
+[workspace]
+resolver = "2"
+members = ["crates/notium-core", "crates/notium-wasm", "src-tauri"]
+
+# Based on https://v2.tauri.app/concept/size/. opt-level stays at 3 (indexing
+# and search speed matter more than a few hundred KB) and panic stays "unwind":
+# a panic inside a blocking command must surface as a CommandError, not abort
+# the whole app.
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true

@@ -1,0 +1,17 @@
+[package]
+name = "notium-wasm"
+version = "0.1.0"
+edition = "2021"
+description = "WebAssembly bindings of notium-core's pure modules for the web build (src/web)"
+license = "UNLICENSED"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+notium-core = { path = "../notium-core", default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Must match the installed `wasm-bindgen` CLI exactly (npm run build:wasm).
+wasm-bindgen = "=0.2.130"

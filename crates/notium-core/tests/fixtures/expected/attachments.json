@@ -1,0 +1,57 @@
+{
+  "note_id": "note_attachments",
+  "title": "Attachments",
+  "editor": "markdown",
+  "meta": {
+    "created_at": null,
+    "updated_at": null,
+    "tags": []
+  },
+  "plain_text": "Attachments\nA picture\nA relative link doc.\nEmbed: ![[image-002.png]]",
+  "tags": [],
+  "out_links": [
+    {
+      "text": "attachments/documento.pdf",
+      "kind": "markdownlink",
+      "target": "attachments/documento.pdf",
+      "is_attachment": true
+    },
+    {
+      "text": "image-002.png",
+      "kind": "embed",
+      "target": "image-002.png",
+      "is_attachment": true
+    }
+  ],
+  "attachment_refs": [
+    "attachments/documento.pdf",
+    "attachments/image-001.jpg",
+    "image-002.png"
+  ],
+  "chunks": [
+    {
+      "chunk_id": "fd9d8804ea351f71f8ef2840d1fd1128",
+      "kind": "heading",
+      "heading_path": "Attachments",
+      "body": "Attachments"
+    },
+    {
+      "chunk_id": "7efbccbb4a1c479879e34afc3aec3fe6",
+      "kind": "paragraph",
+      "heading_path": "Attachments",
+      "body": "A picture"
+    },
+    {
+      "chunk_id": "4b81fc28e338845f14bbc7d01319d44d",
+      "kind": "paragraph",
+      "heading_path": "Attachments",
+      "body": "A relative link doc."
+    },
+    {
+      "chunk_id": "6ebeb3a045cb211f4d94dc5c23101cd4",
+      "kind": "paragraph",
+      "heading_path": "Attachments",
+      "body": "Embed: ![[image-002.png]]"
+    }
+  ]
+}

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-vault-move-folder-to-vault"
+description = "Enables the vault_move_folder_to_vault command without any pre-configured scope."
+commands.allow = ["vault_move_folder_to_vault"]
+
+[[permission]]
+identifier = "deny-vault-move-folder-to-vault"
+description = "Denies the vault_move_folder_to_vault command without any pre-configured scope."
+commands.deny = ["vault_move_folder_to_vault"]

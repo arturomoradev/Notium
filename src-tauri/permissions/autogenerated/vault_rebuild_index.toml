@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-vault-rebuild-index"
+description = "Enables the vault_rebuild_index command without any pre-configured scope."
+commands.allow = ["vault_rebuild_index"]
+
+[[permission]]
+identifier = "deny-vault-rebuild-index"
+description = "Denies the vault_rebuild_index command without any pre-configured scope."
+commands.deny = ["vault_rebuild_index"]

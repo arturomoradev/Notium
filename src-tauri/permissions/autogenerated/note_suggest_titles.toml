@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-note-suggest-titles"
+description = "Enables the note_suggest_titles command without any pre-configured scope."
+commands.allow = ["note_suggest_titles"]
+
+[[permission]]
+identifier = "deny-note-suggest-titles"
+description = "Denies the note_suggest_titles command without any pre-configured scope."
+commands.deny = ["note_suggest_titles"]

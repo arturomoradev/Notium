@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-note-check-link-references"
+description = "Enables the note_check_link_references command without any pre-configured scope."
+commands.allow = ["note_check_link_references"]
+
+[[permission]]
+identifier = "deny-note-check-link-references"
+description = "Denies the note_check_link_references command without any pre-configured scope."
+commands.deny = ["note_check_link_references"]

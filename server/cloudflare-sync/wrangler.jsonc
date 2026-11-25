@@ -1,0 +1,17 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "notium-sync",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-01",
+  // Daily: erase notes that have been in the trash for over 30 days.
+  "triggers": { "crons": ["17 3 * * *"] },
+  // API only. The web app is the separate notium-web Worker (server/notium-web),
+  // which sits behind Cloudflare Access and reaches this one via a service binding.
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "notium-db",
+      "database_id": "<your-d1-database-id>",
+    },
+  ],
+}

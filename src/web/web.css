@@ -1,0 +1,20 @@
+/* Web build only (src/web/main.ts). */
+.web-logout {
+  position: fixed;
+  right: 12px;
+  bottom: 12px;
+  z-index: 1000;
+  padding: 4px 10px;
+  border: 1px solid var(--pill-border);
+  border-radius: 999px;
+  background: var(--pill-bg);
+  color: var(--muted);
+  font: inherit;
+  font-size: 0.75rem;
+  opacity: 0.7;
+  cursor: pointer;
+}
+.web-logout:hover,
+.web-logout:focus-visible {
+  opacity: 1;
+}

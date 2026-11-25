@@ -1,0 +1,376 @@
+interface Env {
+  DB: D1Database;
+  /** Bearer token secret (`wrangler secret put AUTH_TOKEN`). Required. */
+  AUTH_TOKEN?: string;
+  /** Set to "true" only for local development to run without a token. */
+  ALLOW_UNAUTHENTICATED?: string;
+}
+
+function jsonError(status: number, error: string): Response {
+  return new Response(JSON.stringify({ error }), {
+    status,
+    headers: { "Content-Type": "application/json" },
+  });
+}
+
+/** Compare secrets in constant time (hashing first equalizes their lengths). */
+async function timingSafeEqual(a: string, b: string): Promise<boolean> {
+  const enc = new TextEncoder();
+  const [ha, hb] = await Promise.all([
+    crypto.subtle.digest("SHA-256", enc.encode(a)),
+    crypto.subtle.digest("SHA-256", enc.encode(b)),
+  ]);
+  return crypto.subtle.timingSafeEqual(ha, hb);
+}
+
+/**
+ * Bearer-token gate. Fails closed: a deployment without AUTH_TOKEN rejects every
+ * request instead of exposing the vault, unless ALLOW_UNAUTHENTICATED is set.
+ */
+async function authorize(request: Request, env: Env): Promise<Response | null> {
+  if (!env.AUTH_TOKEN) {
+    if (env.ALLOW_UNAUTHENTICATED === "true") return null;
+    return jsonError(
+      503,
+      "Servidor sin configurar: define el secreto AUTH_TOKEN (wrangler secret put AUTH_TOKEN)",
+    );
+  }
+  const token = request.headers.get("Authorization")?.replace(/^Bearer\s+/i, "") ?? "";
+  return (await timingSafeEqual(token, env.AUTH_TOKEN)) ? null : jsonError(401, "No autorizado");
+}
+
+const MAX_D1_BLOB_BYTES = 900_000;
+
+function normalizeVaultId(raw: string | null | undefined): string {
+  const cleaned = (raw ?? "").trim().toLowerCase();
+  if (!cleaned) return "default";
+  return /^[a-z0-9_-]{1,64}$/.test(cleaned) ? cleaned : "default";
+}
+
+function isSafeAttachmentPath(path: string): boolean {
+  if (!path.startsWith("attachments/")) return false;
+  if (path.includes("..") || path.includes("\\") || path.startsWith("/")) return false;
+  return path.length > "attachments/".length;
+}
+
+let schemaInitialized = false;
+
+async function ensureSchema(db: D1Database): Promise<void> {
+  if (schemaInitialized) return;
+  await db.batch([
+    db.prepare(
+      `CREATE TABLE IF NOT EXISTS journal (
+        vault_id TEXT NOT NULL DEFAULT 'default',
+        op_id TEXT NOT NULL,
+        device_id TEXT NOT NULL,
+        note_id TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        base_rev INTEGER NOT NULL,
+        new_rev INTEGER NOT NULL,
+        content BLOB,
+        hlc_ts INTEGER NOT NULL,
+        hlc_cnt INTEGER NOT NULL,
+        ts INTEGER NOT NULL,
+        PRIMARY KEY (vault_id, op_id)
+      )`,
+    ),
+    db.prepare(
+      `CREATE TABLE IF NOT EXISTS blobs (
+        vault_id TEXT NOT NULL DEFAULT 'default',
+        hash TEXT NOT NULL,
+        path TEXT NOT NULL,
+        size INTEGER NOT NULL DEFAULT 0,
+        data BLOB NOT NULL,
+        ts INTEGER NOT NULL,
+        PRIMARY KEY (vault_id, hash, path)
+      )`,
+    ),
+  ]);
+  try {
+    await db
+      .prepare(`ALTER TABLE journal ADD COLUMN vault_id TEXT NOT NULL DEFAULT 'default'`)
+      .run();
+  } catch {
+    // La columna vault_id ya existe en bases de datos creadas o migradas previamente.
+  }
+  try {
+    // Ruta del archivo que fija la op (crear, renombrar, mover). Opcional.
+    await db.prepare(`ALTER TABLE journal ADD COLUMN path TEXT`).run();
+  } catch {
+    // Ya existe.
+  }
+  try {
+    // Borrado definitivo desde la papelera de un dispositivo.
+    await db.prepare(`ALTER TABLE journal ADD COLUMN purge INTEGER NOT NULL DEFAULT 0`).run();
+  } catch {
+    // Ya existe.
+  }
+  await db.batch([
+    db.prepare(`CREATE INDEX IF NOT EXISTS idx_journal_vault_ts ON journal(vault_id, ts)`),
+    db.prepare(`CREATE INDEX IF NOT EXISTS idx_blobs_vault_ts ON blobs(vault_id, ts)`),
+  ]);
+  schemaInitialized = true;
+}
+
+/** Same retention as the apps' trash (notium-core `TRASH_RETENTION_SECS`). */
+const TRASH_RETENTION_SECS = 30 * 24 * 60 * 60;
+
+/** Delete every non-delete op of a note: its content history. */
+function eraseNoteHistory(db: D1Database, vaultId: string, noteId: string): D1PreparedStatement {
+  return db
+    .prepare(`DELETE FROM journal WHERE vault_id = ? AND note_id = ? AND lower(kind) != 'delete'`)
+    .bind(vaultId, noteId);
+}
+
+/**
+ * Erase the history of notes that have been in the trash longer than the
+ * retention: their latest op is a delete older than 30 days (HLC seconds).
+ */
+async function purgeExpiredTrash(db: D1Database, nowSecs: number): Promise<number> {
+  const { meta } = await db
+    .prepare(
+      `DELETE FROM journal
+       WHERE lower(kind) != 'delete'
+         AND (vault_id, note_id) IN (
+           SELECT j.vault_id, j.note_id
+           FROM journal j
+           JOIN (SELECT vault_id, note_id, MAX(ts) AS ts FROM journal GROUP BY vault_id, note_id) last
+             ON j.vault_id = last.vault_id AND j.note_id = last.note_id AND j.ts = last.ts
+           WHERE lower(j.kind) = 'delete' AND j.hlc_ts < ?
+         )`,
+    )
+    .bind(nowSecs - TRASH_RETENTION_SECS)
+    .run();
+  return meta.changes ?? 0;
+}
+
+export default {
+  /** Daily cron (wrangler.jsonc `triggers`): empty the cloud trash. */
+  async scheduled(_event: ScheduledController, env: Env): Promise<void> {
+    await ensureSchema(env.DB);
+    const erased = await purgeExpiredTrash(env.DB, Math.floor(Date.now() / 1000));
+    console.log(`papelera: ${erased} ops de notas caducadas eliminadas`);
+  },
+
+  async fetch(request: Request, env: Env): Promise<Response> {
+    const url = new URL(request.url);
+
+    // 1. Verificación de Token Bearer (obligatoria)
+    const denied = await authorize(request, env);
+    if (denied) return denied;
+
+    // 2. Health check
+    if (url.pathname === "/sync/health") {
+      return new Response(JSON.stringify({ status: "ok", engine: "cloudflare-d1" }), {
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+
+    await ensureSchema(env.DB);
+
+    // 3. Cloudflare D1: Sincronización de adjuntos binarios (/sync/blob/:hash)
+    if (url.pathname.startsWith("/sync/blob/")) {
+      const hash = url.pathname.replace("/sync/blob/", "").trim();
+      const vaultId = normalizeVaultId(url.searchParams.get("vault_id"));
+
+      if (request.method === "POST" || request.method === "PUT") {
+        const rawPath = url.searchParams.get("path") || `attachments/${hash}`;
+        if (!isSafeAttachmentPath(rawPath)) {
+          return new Response(
+            JSON.stringify({ error: "Ruta de adjunto inválida; debe ubicarse en attachments/" }),
+            { status: 400, headers: { "Content-Type": "application/json" } },
+          );
+        }
+
+        const body = await request.arrayBuffer();
+        if (body.byteLength > MAX_D1_BLOB_BYTES) {
+          return new Response(
+            JSON.stringify({
+              error: "Adjunto supera el límite de 900 KB por fila de Cloudflare D1",
+              max_bytes: MAX_D1_BLOB_BYTES,
+            }),
+            { status: 413, headers: { "Content-Type": "application/json" } },
+          );
+        }
+
+        const now = Date.now();
+        await env.DB.prepare(
+          `INSERT OR REPLACE INTO blobs (vault_id, hash, path, size, data, ts)
+           VALUES (?, ?, ?, ?, ?, ?)`,
+        )
+          .bind(vaultId, hash, rawPath, body.byteLength, new Uint8Array(body), now)
+          .run();
+
+        return new Response(
+          JSON.stringify({ status: "stored", vault_id: vaultId, hash, path: rawPath, ts: now }),
+          {
+            status: 201,
+            headers: { "Content-Type": "application/json" },
+          },
+        );
+      }
+
+      if (request.method === "GET") {
+        const row = await env.DB.prepare(
+          `SELECT data FROM blobs WHERE vault_id = ? AND hash = ? LIMIT 1`,
+        )
+          .bind(vaultId, hash)
+          .first<{ data: ArrayBuffer | number[] }>();
+
+        if (!row || !row.data) {
+          return new Response("Blob no encontrado", { status: 404 });
+        }
+
+        const bytes =
+          row.data instanceof ArrayBuffer
+            ? new Uint8Array(row.data)
+            : new Uint8Array(row.data as number[]);
+
+        return new Response(bytes, {
+          headers: { "Content-Type": "application/octet-stream" },
+        });
+      }
+    }
+
+    // 4. POST /sync/push: recepción y persistencia de mutaciones en SQLite D1
+    if (url.pathname === "/sync/push" && request.method === "POST") {
+      const body = await request.json<{ vault_id?: string; device_id: string; ops: any[] }>();
+      const vaultId = normalizeVaultId(body.vault_id);
+      const ops = body.ops || [];
+      const accepted: string[] = [];
+      const serverTs = Date.now();
+
+      // D1 soporta transacciones batch atómicas de hasta 100 sentencias preparadas
+      // Hasta 50 ops por lote: con sus posibles borrados definitivos no pasa de 100 sentencias.
+      const BATCH_SIZE = 50;
+      for (let i = 0; i < ops.length; i += BATCH_SIZE) {
+        const chunk = ops.slice(i, i + BATCH_SIZE);
+        const stmts = chunk.map((op) =>
+          env.DB.prepare(
+            `INSERT OR REPLACE INTO journal (vault_id, op_id, device_id, note_id, kind, base_rev, new_rev, content, hlc_ts, hlc_cnt, ts, path, purge)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          ).bind(
+            vaultId,
+            op.op_id,
+            op.device_id,
+            op.note_id,
+            op.kind,
+            op.base_rev,
+            op.new_rev,
+            op.content ? new Uint8Array(op.content) : null,
+            op.hlc?.ts ?? 0,
+            op.hlc?.cnt ?? 0,
+            serverTs,
+            typeof op.path === "string" ? op.path : null,
+            op.purge === true ? 1 : 0,
+          ),
+        );
+        // Borrado definitivo: se elimina todo el contenido de la nota y solo
+        // quedan sus ops de borrado (para que los dispositivos se enteren).
+        for (const op of chunk) {
+          if (op.purge === true) stmts.push(eraseNoteHistory(env.DB, vaultId, op.note_id));
+        }
+        await env.DB.batch(stmts);
+        for (const op of chunk) {
+          accepted.push(op.op_id);
+        }
+      }
+
+      return new Response(
+        JSON.stringify({
+          status: "ok",
+          vault_id: vaultId,
+          accepted_op_ids: accepted,
+          rejected_op_ids: [],
+          server_cursor: serverTs.toString(),
+        }),
+        { headers: { "Content-Type": "application/json" } },
+      );
+    }
+
+    // 5. GET /sync/pull: entrega de mutaciones y blobs remotos basados en cursor y vault_id
+    if (url.pathname === "/sync/pull" && request.method === "GET") {
+      const vaultId = normalizeVaultId(url.searchParams.get("vault_id"));
+      const since = url.searchParams.get("since") || "0";
+      const sinceTs = parseInt(since, 10) || 0;
+
+      const { results: opRows } = await env.DB.prepare(
+        `SELECT op_id, device_id, note_id, kind, base_rev, new_rev, content, hlc_ts, hlc_cnt, ts, path, purge
+         FROM journal
+         WHERE vault_id = ? AND ts > ?
+         ORDER BY ts ASC, hlc_ts ASC, hlc_cnt ASC
+         LIMIT 500`,
+      )
+        .bind(vaultId, sinceTs)
+        .all();
+
+      const { results: blobRows } = await env.DB.prepare(
+        `SELECT hash, path, size, ts
+         FROM blobs
+         WHERE vault_id = ? AND ts > ?
+         ORDER BY ts ASC
+         LIMIT 500`,
+      )
+        .bind(vaultId, sinceTs)
+        .all();
+
+      const ops = [];
+      let maxOpTs = sinceTs;
+      for (const row of opRows as any[]) {
+        ops.push({
+          op_id: row.op_id,
+          device_id: row.device_id,
+          note_id: row.note_id,
+          kind: row.kind,
+          base_rev: row.base_rev,
+          new_rev: row.new_rev,
+          content: row.content ? Array.from(new Uint8Array(row.content)) : null,
+          hlc: { ts: row.hlc_ts, cnt: row.hlc_cnt },
+          ts: row.ts,
+          // Omitted when absent, so the payload stays identical for older ops.
+          ...(row.path ? { path: row.path } : {}),
+          ...(row.purge ? { purge: true } : {}),
+        });
+        if (row.ts > maxOpTs) {
+          maxOpTs = row.ts;
+        }
+      }
+
+      const blobs = [];
+      let maxBlobTs = sinceTs;
+      for (const b of blobRows as any[]) {
+        blobs.push({
+          hash: b.hash,
+          path: b.path,
+          size: b.size,
+          ts: b.ts,
+        });
+        if (b.ts > maxBlobTs) {
+          maxBlobTs = b.ts;
+        }
+      }
+
+      // A full page may cut a group of rows sharing the last `ts` (one push
+      // stamps all its ops with the same ts); stop just before that ts so the
+      // next pull re-reads the whole group instead of skipping its tail.
+      // Re-delivered ops are idempotent on clients.
+      const fullPageCap = (rows: { ts: number }[], max: number) =>
+        rows.length < 500 ? Infinity : rows[0].ts < max ? max - 1 : max;
+      const rawMax = Math.max(maxOpTs, maxBlobTs);
+      const opCap = fullPageCap(ops, maxOpTs);
+      const blobCap = fullPageCap(blobs, maxBlobTs);
+      const nextCursor = Math.min(rawMax, opCap, blobCap);
+
+      return new Response(
+        JSON.stringify({
+          cursor: nextCursor.toString(),
+          ops,
+          blobs,
+        }),
+        { headers: { "Content-Type": "application/json" } },
+      );
+    }
+
+    return new Response("Not Found", { status: 404 });
+  },
+};

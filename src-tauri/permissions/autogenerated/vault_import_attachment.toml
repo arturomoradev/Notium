@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-vault-import-attachment"
+description = "Enables the vault_import_attachment command without any pre-configured scope."
+commands.allow = ["vault_import_attachment"]
+
+[[permission]]
+identifier = "deny-vault-import-attachment"
+description = "Denies the vault_import_attachment command without any pre-configured scope."
+commands.deny = ["vault_import_attachment"]

@@ -1,0 +1,28 @@
+{
+  "note_id": "note_frontmatter-unknown",
+  "title": "Body",
+  "editor": "markdown",
+  "meta": {
+    "created_at": null,
+    "updated_at": null,
+    "tags": [
+      "alpha",
+      "beta"
+    ]
+  },
+  "plain_text": "Body",
+  "tags": [
+    "alpha",
+    "beta"
+  ],
+  "out_links": [],
+  "attachment_refs": [],
+  "chunks": [
+    {
+      "chunk_id": "fe583c006c3b67e5ab230058b429a0d3",
+      "kind": "heading",
+      "heading_path": "Body",
+      "body": "Body"
+    }
+  ]
+}

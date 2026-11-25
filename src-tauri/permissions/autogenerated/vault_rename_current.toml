@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-vault-rename-current"
+description = "Enables the vault_rename_current command without any pre-configured scope."
+commands.allow = ["vault_rename_current"]
+
+[[permission]]
+identifier = "deny-vault-rename-current"
+description = "Denies the vault_rename_current command without any pre-configured scope."
+commands.deny = ["vault_rename_current"]

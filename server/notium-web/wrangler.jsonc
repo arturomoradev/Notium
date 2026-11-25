@@ -1,0 +1,19 @@
+{
+  "$schema": "../cloudflare-sync/node_modules/wrangler/config-schema.json",
+  // Notium Web: serves dist-web (npm run build:web) on its own hostname so the
+  // whole site can sit behind Cloudflare Access. /sync/* is forwarded to the
+  // notium-sync Worker through a service binding (internal, no Access), where
+  // the Bearer token is still required.
+  "name": "notium-web",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-01",
+  "workers_dev": true,
+  // Preview URLs would expose builds outside the Access app.
+  "preview_urls": false,
+  "assets": {
+    "directory": "../../dist-web",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/sync/*"],
+  },
+  "services": [{ "binding": "SYNC", "service": "notium-sync" }],
+}

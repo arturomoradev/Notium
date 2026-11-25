@@ -1,0 +1,7 @@
+<resources xmlns:tools="http://schemas.android.com/tools">
+    <!-- Base application theme. -->
+    <style name="Theme.notium" parent="Theme.Material3.DayNight.NoActionBar">
+        <!-- Shown behind the transparent system bars; matches the editor background. -->
+        <item name="android:windowBackground">@android:color/white</item>
+    </style>
+</resources>

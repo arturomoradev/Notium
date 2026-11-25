@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-vault-export-bundle"
+description = "Enables the vault_export_bundle command without any pre-configured scope."
+commands.allow = ["vault_export_bundle"]
+
+[[permission]]
+identifier = "deny-vault-export-bundle"
+description = "Denies the vault_export_bundle command without any pre-configured scope."
+commands.deny = ["vault_export_bundle"]

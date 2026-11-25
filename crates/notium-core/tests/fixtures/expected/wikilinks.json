@@ -1,0 +1,73 @@
+{
+  "note_id": "note_wikilinks",
+  "title": "Links",
+  "editor": "markdown",
+  "meta": {
+    "created_at": null,
+    "updated_at": null,
+    "tags": []
+  },
+  "plain_text": "Links\nSee [[Target]] and [[Target|Alias]] and [[Target#Heading]].\nEmbed a note: ![[EmbeddedNote]]\nEmbed an image: ![[image-001.jpg]]",
+  "tags": [],
+  "out_links": [
+    {
+      "text": "Alias",
+      "kind": "wikilink",
+      "target": "Target",
+      "is_attachment": false
+    },
+    {
+      "text": "EmbeddedNote",
+      "kind": "embed",
+      "target": "EmbeddedNote",
+      "is_attachment": false
+    },
+    {
+      "text": "Target",
+      "kind": "wikilink",
+      "target": "Target",
+      "is_attachment": false
+    },
+    {
+      "text": "Target#Heading",
+      "kind": "wikilink",
+      "target": "Target#Heading",
+      "is_attachment": false
+    },
+    {
+      "text": "image-001.jpg",
+      "kind": "embed",
+      "target": "image-001.jpg",
+      "is_attachment": true
+    }
+  ],
+  "attachment_refs": [
+    "image-001.jpg"
+  ],
+  "chunks": [
+    {
+      "chunk_id": "969ae958a362da6e330f45988c55f60c",
+      "kind": "heading",
+      "heading_path": "Links",
+      "body": "Links"
+    },
+    {
+      "chunk_id": "800880478d8032385883bf4ade5b1641",
+      "kind": "paragraph",
+      "heading_path": "Links",
+      "body": "See [[Target]] and [[Target|Alias]] and [[Target#Heading]]."
+    },
+    {
+      "chunk_id": "50e472a31e2dae27cc8f47261dee42b4",
+      "kind": "paragraph",
+      "heading_path": "Links",
+      "body": "Embed a note: ![[EmbeddedNote]]"
+    },
+    {
+      "chunk_id": "dc2f4ae4844504505390062842265ae8",
+      "kind": "paragraph",
+      "heading_path": "Links",
+      "body": "Embed an image: ![[image-001.jpg]]"
+    }
+  ]
+}

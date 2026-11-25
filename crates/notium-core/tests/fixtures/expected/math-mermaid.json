@@ -1,0 +1,40 @@
+{
+  "note_id": "note_math-mermaid",
+  "title": "Diagrams",
+  "editor": "markdown",
+  "meta": {
+    "created_at": null,
+    "updated_at": null,
+    "tags": []
+  },
+  "plain_text": "Diagrams\nInline math $E=mc^2$.\n\\int_0^1 x^2 dx\ngraph TD; A-->B;",
+  "tags": [],
+  "out_links": [],
+  "attachment_refs": [],
+  "chunks": [
+    {
+      "chunk_id": "cdadbd16fbd8c6d58e7b3192c84d14d2",
+      "kind": "heading",
+      "heading_path": "Diagrams",
+      "body": "Diagrams"
+    },
+    {
+      "chunk_id": "3ba3e09c767a2089761afd66d6b4683f",
+      "kind": "paragraph",
+      "heading_path": "Diagrams",
+      "body": "Inline math $E=mc^2$."
+    },
+    {
+      "chunk_id": "d57acb3ecd6f5fc648cae4a983d493d3",
+      "kind": "math",
+      "heading_path": "Diagrams",
+      "body": "\\int_0^1 x^2 dx"
+    },
+    {
+      "chunk_id": "c87d46fa9137b5431708358ef3e1aa22",
+      "kind": "diagram",
+      "heading_path": "Diagrams",
+      "body": "graph TD; A-->B;"
+    }
+  ]
+}

@@ -1,0 +1,32 @@
+# Rust
+/target
+crates/notium-core/target
+
+# Node / frontend
+node_modules
+/dist
+/dist-web
+/src/web/wasm/pkg
+/.svelte-kit
+vite.config.js.timestamp-*
+vite.config.ts.timestamp-*
+
+# Tauri generated
+/src-tauri/gen/schemas
+/src-tauri/gen/android/.kotlin
+
+# Build artifacts
+*.apk
+*.aab
+*.idsig
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Cloudflare Wrangler (local state and dev secrets)
+.wrangler
+.dev.vars
+
+# Machine-specific agent values (paths, URLs)
+AGENTS.local.md

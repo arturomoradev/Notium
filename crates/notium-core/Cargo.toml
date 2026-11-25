@@ -1,0 +1,45 @@
+[package]
+name = "notium-core"
+version = "0.1.0"
+edition = "2021"
+description = "Notium headless Rust core (spike C/D): vault, dual extractor, FTS5 index, sync simulator"
+license = "UNLICENSED"
+
+[lib]
+name = "notium_core"
+path = "src/lib.rs"
+
+[[bin]]
+name = "spike-vault"
+path = "src/bin/spike_vault.rs"
+required-features = ["native"]
+
+[[bin]]
+name = "spike-sync-sim"
+path = "src/bin/spike_sync_sim.rs"
+required-features = ["native"]
+
+[features]
+default = ["native"]
+# Filesystem vault, SQLite index/journal and watcher: everything the apps need.
+# Without it only the pure modules remain (extract, frontmatter, hash, links,
+# sync::merge, clock::Hlc), which is what crates/notium-wasm compiles for the web.
+native = ["dep:rusqlite", "dep:uuid", "dep:notify"]
+
+[dependencies]
+pulldown-cmark = "0.13"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+rusqlite = { version = "0.40", features = ["bundled"], optional = true }
+blake3 = "1"
+uuid = { version = "1", features = ["v7"], optional = true }
+thiserror = "2"
+
+# Desktop-only filesystem watcher (Android and iOS use resume-reconcile instead).
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+notify = { version = "8", optional = true }
+
+[dev-dependencies]
+proptest = "1"
+rusqlite = { version = "0.40", features = ["bundled"] }
+tempfile = "3"
