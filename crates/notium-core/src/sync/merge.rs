@@ -275,8 +275,8 @@ mod tests {
     #[test]
     fn conflict_copy_name_format() {
         assert_eq!(
-            conflict_copy_path("notes/markdown/Proyecto.md", "Arturo", 1234),
-            "notes/markdown/Proyecto (conflict Arturo 1234).md"
+            conflict_copy_path("notes/tiptap/Proyecto.json", "Arturo", 1234),
+            "notes/tiptap/Proyecto (conflict Arturo 1234).json"
         );
     }
 }

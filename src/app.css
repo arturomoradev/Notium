@@ -1222,64 +1222,199 @@ body {
   flex-shrink: 0;
 }
 
-/* ---------- CodeMirror ---------- */
+/* ---------- Tiptap ---------- */
 input,
 textarea,
-.editor-engine .cm-content {
+.editor-engine .tt-content {
   caret-color: var(--caret);
 }
 
-.editor-engine .cm-editor {
+.editor-engine .tt-scroller {
   height: 100%;
   max-width: 100%;
-}
-
-.editor-engine .cm-editor .cm-cursor,
-.editor-engine .cm-editor .cm-dropCursor {
-  border-left-color: var(--caret);
-  border-left-width: 2px;
-}
-
-.editor-engine .cm-editor .cm-selectionBackground,
-.editor-engine .cm-content ::selection {
-  background-color: var(--selection-bg) !important;
-}
-
-.editor-engine .cm-scroller {
-  overflow-x: hidden !important;
-  overflow-y: auto !important;
-  max-width: 100%;
+  overflow-x: hidden;
+  overflow-y: auto;
   /* Native focus scrolling (e.g. the inline title) stops below the top bar. */
   scroll-padding-top: 72px;
-}
-
-.editor-engine .cm-editor,
-.editor-engine .cm-scroller {
   font-family: var(--font-ui);
 }
 
-.editor-engine .cm-content {
+.editor-engine .tt-column {
   box-sizing: border-box;
   width: 100%;
   max-width: var(--editor-max-width, 800px);
   margin: 0 auto;
   padding: 76px 24px 84px;
-  font-family: var(--font-ui);
   font-size: var(--editor-font-size, 15px);
   line-height: 1.7;
   word-break: break-word;
   overflow-wrap: break-word;
 }
 
-.editor-engine .cm-line {
-  max-width: 100%;
-  word-break: break-word;
-  overflow-wrap: break-word;
+.editor-engine .tt-column .cm-inline-title {
+  margin-bottom: 0.6em;
 }
 
-.editor-engine .cm-content[contenteditable="false"] {
+.editor-engine .tt-content {
+  outline: none;
+  min-height: 40vh;
+}
+
+.editor-engine .tt-content ::selection {
+  background-color: var(--selection-bg);
+}
+
+.editor-engine .tt-content[contenteditable="false"] {
   user-select: text;
   -webkit-user-select: text;
+}
+
+.tt-content > * + * {
+  margin-top: 0.5em;
+}
+.tt-content p {
+  margin: 0;
+}
+.tt-content h1,
+.tt-content h2,
+.tt-content h3,
+.tt-content h4,
+.tt-content h5,
+.tt-content h6 {
+  margin: 0.9em 0 0.2em;
+  line-height: 1.3;
+}
+.tt-content h1 {
+  font-size: 1.618em;
+  letter-spacing: -0.015em;
+}
+.tt-content h2 {
+  font-size: 1.462em;
+  letter-spacing: -0.011em;
+}
+.tt-content h3 {
+  font-size: 1.318em;
+}
+.tt-content h4 {
+  font-size: 1.188em;
+}
+.tt-content h5 {
+  font-size: 1.076em;
+}
+.tt-content h6 {
+  font-size: 1em;
+}
+.tt-content ul,
+.tt-content ol {
+  margin: 0;
+  padding-left: 1.6em;
+}
+.tt-content ul[data-type="taskList"] {
+  list-style: none;
+  padding-left: 0.2em;
+}
+.tt-content ul[data-type="taskList"] li {
+  display: flex;
+  gap: 0.5em;
+  align-items: flex-start;
+}
+.tt-content ul[data-type="taskList"] li > label {
+  margin-top: 0.2em;
+}
+.tt-content ul[data-type="taskList"] li > div {
+  flex: 1;
+}
+.tt-content ul[data-type="taskList"] li[data-checked="true"] > div {
+  color: var(--muted);
+  text-decoration: line-through;
+}
+.tt-content blockquote {
+  margin: 0;
+  border-left: 2px solid var(--accent);
+  padding-left: 12px;
+  color: var(--muted);
+}
+.tt-content code {
+  font-family: var(--font-mono, "Cascadia Code", monospace);
+  font-size: 0.9em;
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: var(--panel-2);
+}
+.tt-content pre {
+  overflow-x: auto;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: var(--panel-2);
+}
+.tt-content pre code {
+  padding: 0;
+  background: none;
+}
+.tt-content mark {
+  background: color-mix(in srgb, var(--accent) 28%, transparent);
+  color: inherit;
+  border-radius: 2px;
+}
+.tt-content a {
+  color: var(--accent-text);
+  text-decoration: underline;
+}
+.tt-content hr {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 1em 0;
+}
+.tt-content .tableWrapper {
+  overflow-x: auto;
+}
+.tt-content table {
+  border-collapse: collapse;
+  width: 100%;
+}
+.tt-content th,
+.tt-content td {
+  border: 1px solid var(--border);
+  padding: 5px 9px;
+  vertical-align: top;
+}
+.tt-content th {
+  font-weight: 600;
+  text-align: left;
+}
+.tt-content .selectedCell {
+  background: var(--selection-bg);
+}
+.tt-wiki-embed .cm-vault-image {
+  display: block;
+}
+.tt-content .tt-mermaid > pre {
+  display: none;
+  margin-top: 8px;
+}
+.tt-content .tt-mermaid.editing > pre {
+  display: block;
+}
+.tt-content .tt-mermaid .cm-mermaid-diagram {
+  cursor: pointer;
+}
+.tt-content .tiptap-mathematics-render--editable {
+  cursor: pointer;
+}
+.tt-content [data-type="block-math"] {
+  margin: 0.6em 0;
+  text-align: center;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+.tt-content .inline-math-error,
+.tt-content .block-math-error {
+  color: var(--danger);
+  font-family: var(--font-mono);
+}
+.tt-content .ProseMirror-selectednode.tiptap-mathematics-render {
+  outline: 2px solid var(--accent);
+  border-radius: 4px;
 }
 
 .cm-wiki-link {
@@ -3663,7 +3798,7 @@ button.primary:disabled {
   min-height: 44px;
 }
 
-:root.is-compact .editor-engine .cm-content {
+:root.is-compact .editor-engine .tt-column {
   padding: 76px 16px 96px;
 }
 

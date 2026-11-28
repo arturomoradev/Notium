@@ -101,7 +101,7 @@ const SCHEMA_VERSION: i64 = 1;
 /// Synthetic path prefix used to detach notes/attachments during reconcile so
 /// that a path swap does not trip the UNIQUE constraint. It is never written to
 /// disk and is always replaced before commit. It must never collide with a real
-/// `notes/markdown/...` or `attachments/...` path, which holds because every
+/// `notes/tiptap/...` or `attachments/...` path, which holds because every
 /// real rel-path lives under one of those two roots.
 const RECONCILE_TMP_PREFIX: &str = "__reconcile__/";
 
@@ -1428,7 +1428,7 @@ mod mtime_cache_tests {
     /// Backdate every vault file so its mtime is past the settle window.
     fn age_all(v: &LocalVault) {
         let old = SystemTime::now() - Duration::from_secs(3600);
-        let mut stack = vec![v.root.join("notes/markdown"), v.root.join("attachments")];
+        let mut stack = vec![v.root.join("notes/tiptap"), v.root.join("attachments")];
         while let Some(d) = stack.pop() {
             for e in fs::read_dir(d).unwrap() {
                 let p = e.unwrap().path();
@@ -1446,10 +1446,18 @@ mod mtime_cache_tests {
         let dir = tempfile::tempdir().unwrap();
         let v = LocalVault::new(dir.path());
         v.init().unwrap();
-        v.write_atomic("notes/markdown/A.md", b"# A\n[[B]]\n")
-            .unwrap();
-        v.write_atomic("notes/markdown/B.md", b"# B\n#tag\n")
-            .unwrap();
+        v.write_atomic(
+            "notes/tiptap/A.json",
+            crate::envelope::note_from_text(&String::from_utf8_lossy(b"# A\n[[B]]\n".as_ref()))
+                .as_bytes(),
+        )
+        .unwrap();
+        v.write_atomic(
+            "notes/tiptap/B.json",
+            crate::envelope::note_from_text(&String::from_utf8_lossy(b"# B\n#tag\n".as_ref()))
+                .as_bytes(),
+        )
+        .unwrap();
         v.write_atomic("attachments/x.bin", &[7u8; 4096]).unwrap();
         let mut idx = Index::open_in_memory().unwrap();
         idx.reconcile(&v).unwrap(); // injects ids (rewrites the notes)
@@ -1487,42 +1495,42 @@ mod mtime_cache_tests {
         let second = format!("{:?}", idx.reconcile(&v).unwrap());
         assert_eq!(reads(), 0);
         assert_eq!(first, second);
-        let b = id_at(&idx, "notes", "note_id", "notes/markdown/B.md");
+        let b = id_at(&idx, "notes", "note_id", "notes/tiptap/B.json");
         assert_eq!(idx.tags_for(&b).unwrap(), vec!["tag"]);
 
         // Same size and mtime but different bytes: trusted, so not re-read.
-        let p = v.root.join("notes/markdown/A.md");
-        let (t, before) = (mtime(&p), hash_at(&idx, "notes/markdown/A.md"));
+        let p = v.root.join("notes/tiptap/A.json");
+        let (t, before) = (mtime(&p), hash_at(&idx, "notes/tiptap/A.json"));
         let mut bytes = fs::read(&p).unwrap();
         *bytes.last_mut().unwrap() = b'\t';
         fs::write(&p, &bytes).unwrap();
         set_mtime(&p, t);
         idx.reconcile(&v).unwrap();
         assert_eq!(reads(), 0);
-        assert_eq!(hash_at(&idx, "notes/markdown/A.md"), before);
+        assert_eq!(hash_at(&idx, "notes/tiptap/A.json"), before);
     }
 
     #[test]
     fn edited_note_is_reindexed() {
         let (_d, v, mut idx) = warm();
-        let p = v.root.join("notes/markdown/B.md");
-        let before = hash_at(&idx, "notes/markdown/B.md");
-        let id = id_at(&idx, "notes", "note_id", "notes/markdown/B.md");
-        let mut bytes = fs::read(&p).unwrap();
-        bytes.extend_from_slice(b"\nmore #other\n");
-        fs::write(&p, &bytes).unwrap();
+        let p = v.root.join("notes/tiptap/B.json");
+        let before = hash_at(&idx, "notes/tiptap/B.json");
+        let id = id_at(&idx, "notes", "note_id", "notes/tiptap/B.json");
+        let old = fs::read_to_string(&p).unwrap();
+        let doc = crate::envelope::doc_from_text("# B\n#tag\nmore #other").to_string();
+        fs::write(&p, crate::envelope::with_doc(&old, &doc).unwrap()).unwrap();
         set_mtime(&p, SystemTime::now() - Duration::from_secs(60));
         idx.reconcile(&v).unwrap();
         assert_eq!(reads(), 1);
-        assert_ne!(hash_at(&idx, "notes/markdown/B.md"), before);
-        assert_eq!(id_at(&idx, "notes", "note_id", "notes/markdown/B.md"), id);
+        assert_ne!(hash_at(&idx, "notes/tiptap/B.json"), before);
+        assert_eq!(id_at(&idx, "notes", "note_id", "notes/tiptap/B.json"), id);
         assert_eq!(idx.tags_for(&id).unwrap(), vec!["other", "tag"]);
     }
 
     #[test]
     fn recently_modified_file_is_read_until_it_settles() {
         let (_d, v, mut idx) = warm();
-        let p = v.root.join("notes/markdown/A.md");
+        let p = v.root.join("notes/tiptap/A.json");
         set_mtime(&p, SystemTime::now());
         idx.reconcile(&v).unwrap();
         assert_eq!(reads(), 1);
@@ -1542,12 +1550,12 @@ mod mtime_cache_tests {
     #[test]
     fn moved_note_and_attachment_keep_identity() {
         let (_d, v, mut idx) = warm();
-        let note = id_at(&idx, "notes", "note_id", "notes/markdown/A.md");
+        let note = id_at(&idx, "notes", "note_id", "notes/tiptap/A.json");
         let att = id_at(&idx, "attachments", "att_id", "attachments/x.bin");
-        fs::create_dir_all(v.root.join("notes/markdown/sub")).unwrap();
+        fs::create_dir_all(v.root.join("notes/tiptap/sub")).unwrap();
         fs::rename(
-            v.root.join("notes/markdown/A.md"),
-            v.root.join("notes/markdown/sub/A2.md"),
+            v.root.join("notes/tiptap/A.json"),
+            v.root.join("notes/tiptap/sub/A2.json"),
         )
         .unwrap();
         fs::rename(
@@ -1559,7 +1567,7 @@ mod mtime_cache_tests {
         assert_eq!(reads(), 2);
         assert!(report.tombstones.is_empty());
         assert_eq!(
-            id_at(&idx, "notes", "note_id", "notes/markdown/sub/A2.md"),
+            id_at(&idx, "notes", "note_id", "notes/tiptap/sub/A2.json"),
             note
         );
         assert_eq!(
@@ -1573,8 +1581,8 @@ mod mtime_cache_tests {
     #[test]
     fn deleted_note_is_tombstoned() {
         let (_d, v, mut idx) = warm();
-        let id = id_at(&idx, "notes", "note_id", "notes/markdown/B.md");
-        fs::remove_file(v.root.join("notes/markdown/B.md")).unwrap();
+        let id = id_at(&idx, "notes", "note_id", "notes/tiptap/B.json");
+        fs::remove_file(v.root.join("notes/tiptap/B.json")).unwrap();
         let report = idx.reconcile(&v).unwrap();
         assert_eq!(reads(), 0);
         assert_eq!(report.tombstones, vec![id.clone()]);
@@ -1586,7 +1594,11 @@ mod mtime_cache_tests {
         let dir = tempfile::tempdir().unwrap();
         let v = LocalVault::new(dir.path());
         v.init().unwrap();
-        v.write_atomic("notes/markdown/A.md", b"# A\n").unwrap();
+        v.write_atomic(
+            "notes/tiptap/A.json",
+            crate::envelope::note_from_text(&String::from_utf8_lossy(b"# A\n".as_ref())).as_bytes(),
+        )
+        .unwrap();
         v.write_atomic("attachments/x.bin", b"x").unwrap();
         let db = dir.path().join("old.db");
         {
@@ -1623,7 +1635,7 @@ mod mtime_cache_tests {
                 (i + 1) % 2000,
                 i % 50
             );
-            v.write_atomic_bulk(&format!("notes/markdown/Note {i}.md"), body.as_bytes())
+            v.write_atomic_bulk(&format!("notes/tiptap/Note {i}.json"), body.as_bytes())
                 .unwrap();
         }
         for i in 0..40u8 {

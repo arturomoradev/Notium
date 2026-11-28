@@ -3,9 +3,9 @@
 //! Pure Rust (no Tauri, no WebView). Modules:
 //! - `clock`: UUIDv7 identity + Hybrid Logical Clock (total ordering).
 //! - `hash`: BLAKE3 content hashing + deterministic chunk ids.
-//! - `frontmatter`: surgical YAML frontmatter utilities for `.md` notes.
+//! - `envelope`: the JSON note file (identity + timestamps around a Tiptap doc).
 //! - `vault`: filesystem vault layout + stable identity resolution.
-//! - `extract`: headless Markdown extractor (`.md`).
+//! - `extract`: headless extractor for Tiptap JSON notes (`.json`).
 //! - `index`: derived SQLite index (notes, links, backlinks, FTS5, chunks).
 //! - `links`: link resolution + backlink queries.
 //! - `sync`: op journal, revision log, 3-way merge, conflict resolution.
@@ -16,8 +16,8 @@
 //! the full `sync`; without it only the pure modules build (for WebAssembly).
 
 pub mod clock;
+pub mod envelope;
 pub mod extract;
-pub mod frontmatter;
 pub mod hash;
 #[cfg(feature = "native")]
 pub mod index;

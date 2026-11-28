@@ -17,6 +17,26 @@ import { readFileSync } from "node:fs";
 // Bindings from `npm run build:wasm` (test:web builds them first).
 await initCore(readFileSync(new URL("../src/web/wasm/pkg/notium_wasm_bg.wasm", import.meta.url)));
 
+// A note file whose paragraphs (or `#` headings) are the lines of `text`.
+const docText = (text) =>
+  JSON.stringify({
+    type: "doc",
+    content: text
+      .split("\n")
+      .filter((l) => l.trim())
+      .map((l) => {
+        const m = /^(#{1,6}) (.*)$/.exec(l);
+        return m
+          ? {
+              type: "heading",
+              attrs: { level: m[1].length },
+              content: [{ type: "text", text: m[2] }],
+            }
+          : { type: "paragraph", content: [{ type: "text", text: l }] };
+      }),
+  });
+const file = (id, text, ts = 1) => stitchDoc(newDoc(id, ts), docText(text), id, ts);
+
 const bytes = (s) => Array.from(new TextEncoder().encode(s));
 const op = (o) => ({
   op_id: "op1",
@@ -33,7 +53,11 @@ const op = (o) => ({
 
 test("remote ops build notes, last one wins, delete hides", () => {
   const s = emptyState();
-  applyRemote(s, [op({ kind: "Create", new_rev: 0 }), op({ content: bytes("# Otro\n") })], "web");
+  applyRemote(
+    s,
+    [op({ kind: "Create", new_rev: 0 }), op({ content: bytes(file("n1", "# Otro")) })],
+    "web",
+  );
   assert.equal(titleOf(s.notes.n1), "Otro");
   assert.equal(s.notes.n1.rev, 1);
   applyRemote(s, [op({ kind: "delete", content: null, new_rev: 2 })], "web");
@@ -57,20 +81,20 @@ test("folder ops track empty folders and never become notes", () => {
 test("local save bumps rev and is queued; pending edit survives a concurrent remote op", () => {
   const s = emptyState();
   applyRemote(s, [op({})], "web");
-  const doc = stitchDoc(s.notes.n1.doc, "# Web\n", "n1", 99);
+  const doc = stitchDoc(s.notes.n1.doc, docText("# Web"), "n1", 99);
   localOp(s, "web", "n1", "update", doc, 1);
   assert.equal(s.pending[0].base_rev, 1);
   assert.equal(s.pending[0].new_rev, 2);
-  assert.match(s.notes.n1.doc, /updated: 99/);
-  assert.match(s.notes.n1.doc, /notium_id: n1/);
-  applyRemote(s, [op({ op_id: "op2", new_rev: 2, content: bytes("# PC\n") })], "web");
+  assert.match(s.notes.n1.doc, /"updated": "99"/);
+  assert.match(s.notes.n1.doc, /"notium_id": "n1"/);
+  applyRemote(s, [op({ op_id: "op2", new_rev: 2, content: bytes(file("n1", "# PC")) })], "web");
   assert.equal(titleOf(s.notes.n1), "Web");
 });
 
 test("tags and title fallback", () => {
   const n = {
     id: "note_abcdefgh",
-    doc: "texto #idea y #a/b\n## no",
+    doc: file("note_abcdefgh", "texto #idea y #a/b\n## no"),
     rev: 0,
     updated: 0,
     deleted: false,
@@ -84,20 +108,20 @@ test("paths: latest path op wins, titles come from the file name", () => {
   applyRemote(
     s,
     [
-      op({ hlc: { ts: 20, cnt: 0 }, path: "notes/markdown/Dir/Nuevo.md" }),
-      op({ op_id: "op2", hlc: { ts: 15, cnt: 0 }, path: "notes/markdown/Viejo.md" }),
-      op({ op_id: "op3", hlc: { ts: 30, cnt: 0 }, path: "notes/markdown/../fuera.md" }),
+      op({ hlc: { ts: 20, cnt: 0 }, path: "notes/tiptap/Dir/Nuevo.json" }),
+      op({ op_id: "op2", hlc: { ts: 15, cnt: 0 }, path: "notes/tiptap/Viejo.json" }),
+      op({ op_id: "op3", hlc: { ts: 30, cnt: 0 }, path: "notes/tiptap/../fuera.json" }),
     ],
     "web",
   );
-  assert.equal(s.notes.n1.path, "notes/markdown/Dir/Nuevo.md");
+  assert.equal(s.notes.n1.path, "notes/tiptap/Dir/Nuevo.json");
   assert.equal(titleOf(s.notes.n1), "Nuevo");
   // A local rename outranks what the web has seen and travels with the op.
-  localOp(s, "web", "n1", "update", s.notes.n1.doc, 1, "notes/markdown/Final.md");
-  assert.equal(s.pending.at(-1).path, "notes/markdown/Final.md");
+  localOp(s, "web", "n1", "update", s.notes.n1.doc, 1, "notes/tiptap/Final.json");
+  assert.equal(s.pending.at(-1).path, "notes/tiptap/Final.json");
   applyRemote(
     s,
-    [op({ op_id: "op4", hlc: { ts: 21, cnt: 0 }, path: "notes/markdown/X.md" })],
+    [op({ op_id: "op4", hlc: { ts: 21, cnt: 0 }, path: "notes/tiptap/X.json" })],
     "web",
   );
   assert.equal(titleOf(s.notes.n1), "Final");
@@ -105,14 +129,14 @@ test("paths: latest path op wins, titles come from the file name", () => {
 
 test("own ops rebuild a fresh state but never roll back a newer local one", () => {
   const fresh = emptyState();
-  applyRemote(fresh, [op({ device_id: "web", path: "notes/markdown/Mia.md" })], "web");
+  applyRemote(fresh, [op({ device_id: "web", path: "notes/tiptap/Mia.json" })], "web");
   assert.equal(titleOf(fresh.notes.n1), "Mia");
   const s = emptyState();
   applyRemote(s, [op({})], "web");
-  localOp(s, "web", "n1", "update", newDoc("n1", 1) + "# Nueva\n", 1);
+  localOp(s, "web", "n1", "update", file("n1", "# Nueva"), 1);
   applyRemote(
     s,
-    [op({ op_id: "old", device_id: "web", new_rev: 1, content: bytes("# Vieja\n") })],
+    [op({ op_id: "old", device_id: "web", new_rev: 1, content: bytes(file("n1", "# Vieja")) })],
     "web",
   );
   assert.equal(titleOf(s.notes.n1), "Nueva");
@@ -150,8 +174,8 @@ test("an older content op does not overwrite newer content", () => {
   applyRemote(
     s,
     [
-      op({ new_rev: 3, content: bytes("# Nueva\n") }),
-      op({ op_id: "old", new_rev: 2, content: bytes("# Vieja\n") }),
+      op({ new_rev: 3, content: bytes(file("n1", "# Nueva")) }),
+      op({ op_id: "old", new_rev: 2, content: bytes(file("n1", "# Vieja")) }),
     ],
     "web",
   );
@@ -189,7 +213,7 @@ test("trash: deletes keep the content, restores revive it, purges erase it", () 
         op_id: "r",
         base_rev: 2,
         new_rev: 3,
-        path: "notes/markdown/Vuelta.md",
+        path: "notes/tiptap/Vuelta.json",
         hlc: { ts: 150, cnt: 0 },
       }),
     ],
@@ -201,7 +225,7 @@ test("trash: deletes keep the content, restores revive it, purges erase it", () 
   // Local delete, then a local restore op carries base = tombstone rev.
   localOp(s, "web", "n1", "delete", null, 3);
   assert.equal(trashed(s).length, 1);
-  localOp(s, "web", "n1", "update", s.notes.n1.doc, s.notes.n1.rev, "notes/markdown/Vuelta.md");
+  localOp(s, "web", "n1", "update", s.notes.n1.doc, s.notes.n1.rev, "notes/tiptap/Vuelta.json");
   assert.equal(s.pending.at(-1).base_rev, 4);
   assert.equal(s.notes.n1.deleted, false);
 
@@ -241,8 +265,8 @@ test("names arrive and are made in NFC, like on the devices", async () => {
   assert.equal(sanitizeTitle("Café"), "Café");
   assert.equal(sanitizeFolderPath("México/x"), "México/x");
   const s = emptyState();
-  applyRemote(s, [op({ path: "notes/markdown/Café.md" })], "web");
-  assert.equal(s.notes.n1.path, "notes/markdown/Café.md");
+  applyRemote(s, [op({ path: "notes/tiptap/Café.json" })], "web");
+  assert.equal(s.notes.n1.path, "notes/tiptap/Café.json");
   applyRemote(s, [op({ op_id: "f1", note_id: "folder:México", content: null })], "web");
   assert.ok(s.folders["México"]);
 });

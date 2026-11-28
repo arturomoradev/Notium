@@ -16,7 +16,13 @@ fn f1_build_and_fts() {
     for i in 0..20 {
         let content = format!("# Note {i}\n\nUnique keyword{i} body.\n");
         vault
-            .write_atomic(&format!("notes/markdown/N{i}.md"), content.as_bytes())
+            .write_atomic(
+                &format!("notes/tiptap/N{i}.json"),
+                notium_core::envelope::note_from_text(&String::from_utf8_lossy(
+                    content.as_bytes().as_ref(),
+                ))
+                .as_bytes(),
+            )
             .unwrap();
     }
     let mut index = Index::open(&vault.index_db_path()).unwrap();
@@ -32,7 +38,13 @@ fn f2_accent_insensitive_search() {
     let (_d, vault) = setup();
     let content = "# Cancion\n\nLa canci\u{f3}n de cuna en ingl\u{e9}s.\n";
     vault
-        .write_atomic("notes/markdown/Cancion.md", content.as_bytes())
+        .write_atomic(
+            "notes/tiptap/Cancion.json",
+            notium_core::envelope::note_from_text(&String::from_utf8_lossy(
+                content.as_bytes().as_ref(),
+            ))
+            .as_bytes(),
+        )
         .unwrap();
     let mut index = Index::open(&vault.index_db_path()).unwrap();
     index.rebuild(&vault).unwrap();
@@ -44,17 +56,29 @@ fn f2_accent_insensitive_search() {
 fn f3_tag_and_format_filters() {
     let (_d, vault) = setup();
     vault
-        .write_atomic("notes/markdown/A.md", b"# A\n\n#work stuff\n")
+        .write_atomic(
+            "notes/tiptap/A.json",
+            notium_core::envelope::note_from_text(&String::from_utf8_lossy(
+                b"# A\n\n#work stuff\n".as_ref(),
+            ))
+            .as_bytes(),
+        )
         .unwrap();
     vault
-        .write_atomic("notes/markdown/B.md", b"# B\n\nother stuff #personal\n")
+        .write_atomic(
+            "notes/tiptap/B.json",
+            notium_core::envelope::note_from_text(&String::from_utf8_lossy(
+                b"# B\n\nother stuff #personal\n".as_ref(),
+            ))
+            .as_bytes(),
+        )
         .unwrap();
     let mut index = Index::open(&vault.index_db_path()).unwrap();
     index.rebuild(&vault).unwrap();
 
-    let md = index.search("stuff", None, Some("markdown")).unwrap();
+    let md = index.search("stuff", None, Some("tiptap")).unwrap();
     assert_eq!(md.len(), 2);
-    assert_eq!(md[0].format, "markdown");
+    assert_eq!(md[0].format, "tiptap");
 
     let tagged = index.search("stuff", Some("work"), None).unwrap();
     assert_eq!(tagged.len(), 1);
@@ -65,16 +89,34 @@ fn f3_tag_and_format_filters() {
 fn f4_incremental_update() {
     let (_d, vault) = setup();
     vault
-        .write_atomic("notes/markdown/A.md", b"# A\n\nold\n")
+        .write_atomic(
+            "notes/tiptap/A.json",
+            notium_core::envelope::note_from_text(&String::from_utf8_lossy(
+                b"# A\n\nold\n".as_ref(),
+            ))
+            .as_bytes(),
+        )
         .unwrap();
     vault
-        .write_atomic("notes/markdown/B.md", b"# B\n\nunchanged\n")
+        .write_atomic(
+            "notes/tiptap/B.json",
+            notium_core::envelope::note_from_text(&String::from_utf8_lossy(
+                b"# B\n\nunchanged\n".as_ref(),
+            ))
+            .as_bytes(),
+        )
         .unwrap();
     let mut index = Index::open(&vault.index_db_path()).unwrap();
     index.rebuild(&vault).unwrap();
 
     vault
-        .write_atomic("notes/markdown/A.md", b"# A\n\nnew content\n")
+        .write_atomic(
+            "notes/tiptap/A.json",
+            notium_core::envelope::note_from_text(&String::from_utf8_lossy(
+                b"# A\n\nnew content\n".as_ref(),
+            ))
+            .as_bytes(),
+        )
         .unwrap();
     index.reconcile(&vault).unwrap();
 
@@ -89,8 +131,11 @@ fn f5_rebuild_equals_incremental() {
     for i in 0..10 {
         vault
             .write_atomic(
-                &format!("notes/markdown/N{i}.md"),
-                format!("# N{i}\n\nbody {i}\n").as_bytes(),
+                &format!("notes/tiptap/N{i}.json"),
+                notium_core::envelope::note_from_text(&String::from_utf8_lossy(
+                    format!("# N{i}\n\nbody {i}\n").as_bytes().as_ref(),
+                ))
+                .as_bytes(),
             )
             .unwrap();
     }
@@ -109,8 +154,13 @@ fn f6_rebuild_10k_perf() {
     for i in 0..10_000 {
         vault
             .write_atomic(
-                &format!("notes/markdown/N{i:05}.md"),
-                format!("# N{i}\n\nbody text for note {i}\n").as_bytes(),
+                &format!("notes/tiptap/N{i:05}.json"),
+                notium_core::envelope::note_from_text(&String::from_utf8_lossy(
+                    format!("# N{i}\n\nbody text for note {i}\n")
+                        .as_bytes()
+                        .as_ref(),
+                ))
+                .as_bytes(),
             )
             .unwrap();
     }
@@ -131,8 +181,11 @@ fn f7_attachment_refs_populated_on_reconcile() {
         .unwrap();
     vault
         .write_atomic(
-            "notes/markdown/A.md",
-            b"# A\n\nEmbed: ![[attachments/photo.jpg]]\n",
+            "notes/tiptap/A.json",
+            notium_core::envelope::note_from_text(&String::from_utf8_lossy(
+                b"# A\n\nEmbed: ![[attachments/photo.jpg]]\n".as_ref(),
+            ))
+            .as_bytes(),
         )
         .unwrap();
     let mut index = Index::open(&vault.index_db_path()).unwrap();
@@ -158,10 +211,22 @@ fn f7_attachment_refs_populated_on_reconcile() {
 fn reconcile_handles_path_swap() {
     let (_d, vault) = setup();
     vault
-        .write_atomic("notes/markdown/A.md", b"# A\n\ncontent A\n")
+        .write_atomic(
+            "notes/tiptap/A.json",
+            notium_core::envelope::note_from_text(&String::from_utf8_lossy(
+                b"# A\n\ncontent A\n".as_ref(),
+            ))
+            .as_bytes(),
+        )
         .unwrap();
     vault
-        .write_atomic("notes/markdown/B.md", b"# B\n\ncontent B\n")
+        .write_atomic(
+            "notes/tiptap/B.json",
+            notium_core::envelope::note_from_text(&String::from_utf8_lossy(
+                b"# B\n\ncontent B\n".as_ref(),
+            ))
+            .as_bytes(),
+        )
         .unwrap();
     let mut index = Index::open(&vault.index_db_path()).unwrap();
     index.rebuild(&vault).unwrap();
@@ -169,32 +234,32 @@ fn reconcile_handles_path_swap() {
     let before = index.list_notes().unwrap();
     let id_a = before
         .iter()
-        .find(|n| n.path == "notes/markdown/A.md")
+        .find(|n| n.path == "notes/tiptap/A.json")
         .unwrap()
         .note_id
         .clone();
     let id_b = before
         .iter()
-        .find(|n| n.path == "notes/markdown/B.md")
+        .find(|n| n.path == "notes/tiptap/B.json")
         .unwrap()
         .note_id
         .clone();
 
     // Swap the file bytes: each file now carries the other note's embedded id.
-    let bytes_a = vault.read("notes/markdown/A.md").unwrap();
-    let bytes_b = vault.read("notes/markdown/B.md").unwrap();
-    vault.write_atomic("notes/markdown/A.md", &bytes_b).unwrap();
-    vault.write_atomic("notes/markdown/B.md", &bytes_a).unwrap();
+    let bytes_a = vault.read("notes/tiptap/A.json").unwrap();
+    let bytes_b = vault.read("notes/tiptap/B.json").unwrap();
+    vault.write_atomic("notes/tiptap/A.json", &bytes_b).unwrap();
+    vault.write_atomic("notes/tiptap/B.json", &bytes_a).unwrap();
 
     index.reconcile(&vault).unwrap();
 
     assert_eq!(
         index.get_note(&id_a).unwrap().unwrap().path,
-        "notes/markdown/B.md"
+        "notes/tiptap/B.json"
     );
     assert_eq!(
         index.get_note(&id_b).unwrap().unwrap().path,
-        "notes/markdown/A.md"
+        "notes/tiptap/A.json"
     );
     // No synthetic sentinel path may remain.
     assert!(index
@@ -208,13 +273,31 @@ fn reconcile_handles_path_swap() {
 fn reconcile_handles_three_way_cycle() {
     let (_d, vault) = setup();
     vault
-        .write_atomic("notes/markdown/A.md", b"# A\n\ncontent A\n")
+        .write_atomic(
+            "notes/tiptap/A.json",
+            notium_core::envelope::note_from_text(&String::from_utf8_lossy(
+                b"# A\n\ncontent A\n".as_ref(),
+            ))
+            .as_bytes(),
+        )
         .unwrap();
     vault
-        .write_atomic("notes/markdown/B.md", b"# B\n\ncontent B\n")
+        .write_atomic(
+            "notes/tiptap/B.json",
+            notium_core::envelope::note_from_text(&String::from_utf8_lossy(
+                b"# B\n\ncontent B\n".as_ref(),
+            ))
+            .as_bytes(),
+        )
         .unwrap();
     vault
-        .write_atomic("notes/markdown/C.md", b"# C\n\ncontent C\n")
+        .write_atomic(
+            "notes/tiptap/C.json",
+            notium_core::envelope::note_from_text(&String::from_utf8_lossy(
+                b"# C\n\ncontent C\n".as_ref(),
+            ))
+            .as_bytes(),
+        )
         .unwrap();
     let mut index = Index::open(&vault.index_db_path()).unwrap();
     index.rebuild(&vault).unwrap();
@@ -222,46 +305,46 @@ fn reconcile_handles_three_way_cycle() {
     let before = index.list_notes().unwrap();
     let id_a = before
         .iter()
-        .find(|n| n.path == "notes/markdown/A.md")
+        .find(|n| n.path == "notes/tiptap/A.json")
         .unwrap()
         .note_id
         .clone();
     let id_b = before
         .iter()
-        .find(|n| n.path == "notes/markdown/B.md")
+        .find(|n| n.path == "notes/tiptap/B.json")
         .unwrap()
         .note_id
         .clone();
     let id_c = before
         .iter()
-        .find(|n| n.path == "notes/markdown/C.md")
+        .find(|n| n.path == "notes/tiptap/C.json")
         .unwrap()
         .note_id
         .clone();
 
     // Rotate A->B, B->C, C->A.
     let (ba, bb, bc) = (
-        vault.read("notes/markdown/A.md").unwrap(),
-        vault.read("notes/markdown/B.md").unwrap(),
-        vault.read("notes/markdown/C.md").unwrap(),
+        vault.read("notes/tiptap/A.json").unwrap(),
+        vault.read("notes/tiptap/B.json").unwrap(),
+        vault.read("notes/tiptap/C.json").unwrap(),
     );
-    vault.write_atomic("notes/markdown/A.md", &bc).unwrap();
-    vault.write_atomic("notes/markdown/B.md", &ba).unwrap();
-    vault.write_atomic("notes/markdown/C.md", &bb).unwrap();
+    vault.write_atomic("notes/tiptap/A.json", &bc).unwrap();
+    vault.write_atomic("notes/tiptap/B.json", &ba).unwrap();
+    vault.write_atomic("notes/tiptap/C.json", &bb).unwrap();
 
     index.reconcile(&vault).unwrap();
 
     assert_eq!(
         index.get_note(&id_a).unwrap().unwrap().path,
-        "notes/markdown/B.md"
+        "notes/tiptap/B.json"
     );
     assert_eq!(
         index.get_note(&id_b).unwrap().unwrap().path,
-        "notes/markdown/C.md"
+        "notes/tiptap/C.json"
     );
     assert_eq!(
         index.get_note(&id_c).unwrap().unwrap().path,
-        "notes/markdown/A.md"
+        "notes/tiptap/A.json"
     );
 }
 
@@ -269,10 +352,22 @@ fn reconcile_handles_three_way_cycle() {
 fn reconcile_moved_note_takes_over_tombstoned_path() {
     let (_d, vault) = setup();
     vault
-        .write_atomic("notes/markdown/A.md", b"# A\n\ncontent A\n")
+        .write_atomic(
+            "notes/tiptap/A.json",
+            notium_core::envelope::note_from_text(&String::from_utf8_lossy(
+                b"# A\n\ncontent A\n".as_ref(),
+            ))
+            .as_bytes(),
+        )
         .unwrap();
     vault
-        .write_atomic("notes/markdown/B.md", b"# B\n\ncontent B\n")
+        .write_atomic(
+            "notes/tiptap/B.json",
+            notium_core::envelope::note_from_text(&String::from_utf8_lossy(
+                b"# B\n\ncontent B\n".as_ref(),
+            ))
+            .as_bytes(),
+        )
         .unwrap();
     let mut index = Index::open(&vault.index_db_path()).unwrap();
     index.rebuild(&vault).unwrap();
@@ -281,35 +376,47 @@ fn reconcile_moved_note_takes_over_tombstoned_path() {
         .list_notes()
         .unwrap()
         .iter()
-        .find(|n| n.path == "notes/markdown/A.md")
+        .find(|n| n.path == "notes/tiptap/A.json")
         .unwrap()
         .note_id
         .clone();
 
     // Delete A: file moves to trash, the index keeps a tombstone at its path.
-    vault.delete_to_trash("notes/markdown/A.md").unwrap();
+    vault.delete_to_trash("notes/tiptap/A.json").unwrap();
     index.mark_tombstoned(&id_a).unwrap();
 
     // Rename B onto A's now-free path (what rename_impl does).
-    let new_path = vault.rename_note("notes/markdown/B.md", "A").unwrap();
-    assert_eq!(new_path, "notes/markdown/A.md");
+    let new_path = vault.rename_note("notes/tiptap/B.json", "A").unwrap();
+    assert_eq!(new_path, "notes/tiptap/A.json");
 
     index.reconcile(&vault).unwrap();
 
     // The tombstoned note keeps its real path and does not block the mover.
     let a = index.get_note(&id_a).unwrap().unwrap();
     assert!(a.tombstoned);
-    assert_eq!(a.path, "notes/markdown/A.md");
+    assert_eq!(a.path, "notes/tiptap/A.json");
 }
 
 #[test]
 fn reconcile_note_takes_over_path_tombstoned_in_same_pass() {
     let (_d, vault) = setup();
     vault
-        .write_atomic("notes/markdown/A.md", b"# A\n\ncontent A\n")
+        .write_atomic(
+            "notes/tiptap/A.json",
+            notium_core::envelope::note_from_text(&String::from_utf8_lossy(
+                b"# A\n\ncontent A\n".as_ref(),
+            ))
+            .as_bytes(),
+        )
         .unwrap();
     vault
-        .write_atomic("notes/markdown/B.md", b"# B\n\ncontent B\n")
+        .write_atomic(
+            "notes/tiptap/B.json",
+            notium_core::envelope::note_from_text(&String::from_utf8_lossy(
+                b"# B\n\ncontent B\n".as_ref(),
+            ))
+            .as_bytes(),
+        )
         .unwrap();
     let mut index = Index::open(&vault.index_db_path()).unwrap();
     index.rebuild(&vault).unwrap();
@@ -318,7 +425,7 @@ fn reconcile_note_takes_over_path_tombstoned_in_same_pass() {
         .list_notes()
         .unwrap()
         .iter()
-        .find(|n| n.path == "notes/markdown/A.md")
+        .find(|n| n.path == "notes/tiptap/A.json")
         .unwrap()
         .note_id
         .clone();
@@ -326,9 +433,9 @@ fn reconcile_note_takes_over_path_tombstoned_in_same_pass() {
     // Delete A's file and rename B onto A's path within the same window, with
     // no intervening reconcile: A is tombstoned and B takes over A.md in a
     // single reconcile pass.
-    vault.delete_to_trash("notes/markdown/A.md").unwrap();
-    let new_path = vault.rename_note("notes/markdown/B.md", "A").unwrap();
-    assert_eq!(new_path, "notes/markdown/A.md");
+    vault.delete_to_trash("notes/tiptap/A.json").unwrap();
+    let new_path = vault.rename_note("notes/tiptap/B.json", "A").unwrap();
+    assert_eq!(new_path, "notes/tiptap/A.json");
 
     // Previously failed: the note being tombstoned still held A.md while B was
     // upserted onto it.
@@ -341,8 +448,8 @@ fn reconcile_note_takes_over_path_tombstoned_in_same_pass() {
         .list_notes()
         .unwrap()
         .into_iter()
-        .find(|n| n.path == "notes/markdown/A.md" && !n.tombstoned)
-        .expect("a live note should occupy A.md");
+        .find(|n| n.path == "notes/tiptap/A.json" && !n.tombstoned)
+        .expect("a live note should occupy A.json");
     assert_ne!(live_at_a.note_id, id_a);
 }
 
@@ -350,7 +457,13 @@ fn reconcile_note_takes_over_path_tombstoned_in_same_pass() {
 fn delete_then_create_same_title_does_not_collide() {
     let (_d, vault) = setup();
     vault
-        .write_atomic("notes/markdown/Foo.md", b"# Foo\n\nold\n")
+        .write_atomic(
+            "notes/tiptap/Foo.json",
+            notium_core::envelope::note_from_text(&String::from_utf8_lossy(
+                b"# Foo\n\nold\n".as_ref(),
+            ))
+            .as_bytes(),
+        )
         .unwrap();
     let mut index = Index::open(&vault.index_db_path()).unwrap();
     index.rebuild(&vault).unwrap();
@@ -359,39 +472,34 @@ fn delete_then_create_same_title_does_not_collide() {
         .list_notes()
         .unwrap()
         .iter()
-        .find(|n| n.path == "notes/markdown/Foo.md")
+        .find(|n| n.path == "notes/tiptap/Foo.json")
         .unwrap()
         .note_id
         .clone();
 
     // Delete (file to trash, tombstone kept).
-    vault.delete_to_trash("notes/markdown/Foo.md").unwrap();
+    vault.delete_to_trash("notes/tiptap/Foo.json").unwrap();
     index.mark_tombstoned(&id_old).unwrap();
 
     // Recreate the same title, as create_impl does (create_note_in + reindex_note).
     let id_new = notium_core::clock::note_id();
     let rel_path = vault
-        .create_note_in(
-            notium_core::extract::EditorKind::Markdown,
-            "Foo",
-            &id_new,
-            "",
-        )
+        .create_note_in(notium_core::extract::EditorKind::Tiptap, "Foo", &id_new, "")
         .unwrap();
-    assert_eq!(rel_path, "notes/markdown/Foo.md");
+    assert_eq!(rel_path, "notes/tiptap/Foo.json");
     let bytes = vault.read(&rel_path).unwrap();
     index
         .reindex_note(
             &id_new,
             &rel_path,
-            notium_core::extract::EditorKind::Markdown,
+            notium_core::extract::EditorKind::Tiptap,
             &bytes,
         )
         .unwrap();
 
     assert_eq!(
         index.get_note(&id_new).unwrap().unwrap().path,
-        "notes/markdown/Foo.md"
+        "notes/tiptap/Foo.json"
     );
 }
 
@@ -399,18 +507,30 @@ fn delete_then_create_same_title_does_not_collide() {
 fn reconcile_is_idempotent_after_swap() {
     let (_d, vault) = setup();
     vault
-        .write_atomic("notes/markdown/A.md", b"# A\n\ncontent A\n")
+        .write_atomic(
+            "notes/tiptap/A.json",
+            notium_core::envelope::note_from_text(&String::from_utf8_lossy(
+                b"# A\n\ncontent A\n".as_ref(),
+            ))
+            .as_bytes(),
+        )
         .unwrap();
     vault
-        .write_atomic("notes/markdown/B.md", b"# B\n\ncontent B\n")
+        .write_atomic(
+            "notes/tiptap/B.json",
+            notium_core::envelope::note_from_text(&String::from_utf8_lossy(
+                b"# B\n\ncontent B\n".as_ref(),
+            ))
+            .as_bytes(),
+        )
         .unwrap();
     let mut index = Index::open(&vault.index_db_path()).unwrap();
     index.rebuild(&vault).unwrap();
 
-    let bytes_a = vault.read("notes/markdown/A.md").unwrap();
-    let bytes_b = vault.read("notes/markdown/B.md").unwrap();
-    vault.write_atomic("notes/markdown/A.md", &bytes_b).unwrap();
-    vault.write_atomic("notes/markdown/B.md", &bytes_a).unwrap();
+    let bytes_a = vault.read("notes/tiptap/A.json").unwrap();
+    let bytes_b = vault.read("notes/tiptap/B.json").unwrap();
+    vault.write_atomic("notes/tiptap/A.json", &bytes_b).unwrap();
+    vault.write_atomic("notes/tiptap/B.json", &bytes_a).unwrap();
 
     index.reconcile(&vault).unwrap();
     let first = index.list_notes().unwrap();
@@ -494,9 +614,9 @@ fn migration_rebuilds_legacy_unique_and_format_check() {
                tombstoned   INTEGER NOT NULL DEFAULT 0
              );
              INSERT INTO notes (note_id, path, format, title, content_hash)
-               VALUES ('n_md', 'notes/markdown/Foo.md', 'markdown', 'Foo', 'h1');
+               VALUES ('n_md', 'notes/tiptap/Foo.json', 'markdown', 'Foo', 'h1');
              INSERT INTO notes (note_id, path, format, title, content_hash)
-               VALUES ('n_rt', 'notes/markdown/Bar.json', 'richtext', 'Bar', 'h2');
+               VALUES ('n_rt', 'notes/tiptap/Bar.json', 'richtext', 'Bar', 'h2');
              INSERT INTO attachments (att_id, path, content_hash, file_size)
                VALUES ('a1', 'attachments/x.png', 'h3', 4);",
         )
@@ -520,11 +640,11 @@ fn migration_rebuilds_legacy_unique_and_format_check() {
     // Both rows survived, including the legacy 'richtext' note.
     assert_eq!(
         index.get_note("n_md").unwrap().unwrap().path,
-        "notes/markdown/Foo.md"
+        "notes/tiptap/Foo.json"
     );
     assert_eq!(
         index.get_note("n_rt").unwrap().unwrap().path,
-        "notes/markdown/Bar.json"
+        "notes/tiptap/Bar.json"
     );
 
     // The partial unique index now exists.

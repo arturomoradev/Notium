@@ -14,6 +14,7 @@ use std::time::Instant;
 use tauri::{AppHandle, Emitter, State};
 
 use notium_core::clock;
+use notium_core::envelope;
 use notium_core::extract::EditorKind;
 use notium_core::sync;
 use notium_core::vault;
@@ -336,7 +337,7 @@ pub async fn vault_import_bundle(
         for entry in bundle.entries {
             let rel = entry.rel_path.replace('\\', "/");
             if rel.contains("..")
-                || (!rel.starts_with("notes/markdown/") && !rel.starts_with("attachments/"))
+                || (!rel.starts_with("notes/tiptap/") && !rel.starts_with("attachments/"))
             {
                 continue;
             }
@@ -626,7 +627,7 @@ pub async fn vault_list_folders(
 
 pub(crate) fn list_folders_impl(h: &VaultHandle) -> Result<Vec<FolderDto>, CommandError> {
     let mut folders = Vec::new();
-    let mut pending = vec![h.vault.root.join(vault::NOTES_MD)];
+    let mut pending = vec![h.vault.root.join(vault::NOTES_DIR)];
     while let Some(dir) = pending.pop() {
         if !dir.exists() {
             continue;
@@ -694,7 +695,7 @@ fn delete_folder_impl(
     keep_content: bool,
 ) -> Result<usize, CommandError> {
     let clean = vault::sanitize_folder_path(folder)?;
-    let prefix = format!("{}/{}/", vault::NOTES_MD, clean);
+    let prefix = format!("{}/{}/", vault::NOTES_DIR, clean);
     let existing_notes = h
         .index
         .list_notes()
@@ -731,7 +732,7 @@ fn move_folder_to_vault_impl(
             "source and destination vault are the same".into(),
         ));
     }
-    let src_dir = h.vault.root.join(vault::NOTES_MD).join(&clean);
+    let src_dir = h.vault.root.join(vault::NOTES_DIR).join(&clean);
     if !src_dir.exists() {
         return Err(CommandError::NotFound(clean));
     }
@@ -740,7 +741,7 @@ fn move_folder_to_vault_impl(
     target_vault.init()?;
     let _ = target_vault.create_folder(&clean);
 
-    let prefix = format!("{}/{}/", vault::NOTES_MD, clean);
+    let prefix = format!("{}/{}/", vault::NOTES_DIR, clean);
     let notes_in_folder: Vec<notium_core::index::NoteRecord> = h
         .index
         .list_notes()
@@ -757,7 +758,7 @@ fn move_folder_to_vault_impl(
             let p = entry.path();
             if p.is_dir() {
                 dir_stack.push(p.clone());
-                if let Ok(rel_sub) = p.strip_prefix(h.vault.root.join(vault::NOTES_MD)) {
+                if let Ok(rel_sub) = p.strip_prefix(h.vault.root.join(vault::NOTES_DIR)) {
                     let rel_sub_str = rel_sub.to_string_lossy().replace('\\', "/");
                     let _ = target_vault.create_folder(&rel_sub_str);
                 }
@@ -771,7 +772,7 @@ fn move_folder_to_vault_impl(
         let bytes = h.vault.read(&rec.path)?;
         // Copy any attachments referenced by this note
         if let Ok(extracted) =
-            notium_core::extract::extract(EditorKind::Markdown, &rec.note_id, &bytes)
+            notium_core::extract::extract(EditorKind::Tiptap, &rec.note_id, &bytes)
         {
             for att_ref in extracted.attachment_refs {
                 let att_rel = if att_ref.starts_with("attachments/") {
@@ -792,12 +793,12 @@ fn move_folder_to_vault_impl(
             let parent = std::path::Path::new(&rec.path)
                 .parent()
                 .map(|p| p.to_string_lossy().replace('\\', "/"))
-                .unwrap_or_else(|| vault::NOTES_MD.to_string());
+                .unwrap_or_else(|| vault::NOTES_DIR.to_string());
             let mut n = 2usize;
-            let mut candidate = format!("{parent}/{stem} {n}.md");
+            let mut candidate = format!("{parent}/{stem} {n}.json");
             while target_vault.exists(&candidate) {
                 n += 1;
-                candidate = format!("{parent}/{stem} {n}.md");
+                candidate = format!("{parent}/{stem} {n}.json");
             }
             candidate
         } else {
@@ -1434,7 +1435,7 @@ fn vault_info(h: &VaultHandle) -> Result<VaultInfoDto, CommandError> {
         .map_err(|e| CommandError::Sql(e.to_string()))?;
     let notes = recs.iter().filter(|n| !n.tombstoned).count();
     let mut folders = HashSet::new();
-    let mut pending = vec![h.vault.root.join(vault::NOTES_MD)];
+    let mut pending = vec![h.vault.root.join(vault::NOTES_DIR)];
     while let Some(dir) = pending.pop() {
         if !dir.exists() {
             continue;
@@ -1468,7 +1469,7 @@ fn vault_info(h: &VaultHandle) -> Result<VaultInfoDto, CommandError> {
 
 fn parse_format(kind: &str) -> Result<EditorKind, CommandError> {
     match kind {
-        "" | "markdown" | "md" => Ok(EditorKind::Markdown),
+        "" | "tiptap" => Ok(EditorKind::Tiptap),
         other => Err(CommandError::InvalidFormat(other.to_string())),
     }
 }
@@ -1619,24 +1620,17 @@ pub(crate) fn save_impl(
     }
 
     let editor = parse_format(&rec.format)?;
-    // Identity is never lost by a save: re-inject the id if frontmatter was stripped,
-    // or stitch the existing frontmatter onto the edited body, and update `updated`.
+    // `content` is the editor's Tiptap doc; the envelope (id, dates) stays in the
+    // backend, so a save never loses identity. A malformed doc is refused, not written.
     let ts = vault::now_ts();
     let bytes = match editor {
-        EditorKind::Markdown => {
+        EditorKind::Tiptap => {
             let previous = h.vault.read(&rec.path)?;
             let previous = String::from_utf8_lossy(&previous);
-            let (fm, old_body) = notium_core::frontmatter::split(&previous);
-            let full_doc = if fm.is_some() {
-                let prefix_len = previous.len() - old_body.len();
-                let mut stitched = String::with_capacity(prefix_len + content.len());
-                stitched.push_str(&previous[..prefix_len]);
-                stitched.push_str(content);
-                notium_core::frontmatter::inject_notium_id(&stitched, note_id)
-            } else {
-                notium_core::frontmatter::inject_notium_id(content, note_id)
-            };
-            notium_core::frontmatter::upsert_field(&full_doc, "updated", &ts).into_bytes()
+            let file =
+                envelope::with_doc(&previous, content).map_err(CommandError::InvalidFormat)?;
+            let file = envelope::inject_notium_id(&file, note_id);
+            envelope::upsert_field(&file, "updated", &ts).into_bytes()
         }
     };
 
@@ -1688,7 +1682,7 @@ pub(crate) fn save_impl(
 fn editor_content(bytes: &[u8], editor: EditorKind) -> String {
     let raw = String::from_utf8_lossy(bytes);
     match editor {
-        EditorKind::Markdown => notium_core::frontmatter::split(&raw).1.to_string(),
+        EditorKind::Tiptap => envelope::doc_json(&raw),
     }
 }
 
@@ -1997,7 +1991,7 @@ fn check_link_references_impl(
         if let Ok(bytes) = h.vault.read(&path) {
             let content = String::from_utf8_lossy(&bytes);
             let (_, count) =
-                notium_core::links::rewrite_wikilink_targets(&content, old_title, "PLACEHOLDER");
+                notium_core::links::rewrite_note_links(&content, old_title, "PLACEHOLDER");
             if count > 0 {
                 refs.push(LinkReferenceDto {
                     note_id,
@@ -2043,7 +2037,7 @@ fn repair_links_impl(
         if let Ok(bytes) = h.vault.read(&path) {
             let original = String::from_utf8_lossy(&bytes);
             let (rewritten, count) =
-                notium_core::links::rewrite_wikilink_targets(&original, old_title, new_title);
+                notium_core::links::rewrite_note_links(&original, old_title, new_title);
             if count > 0 && rewritten != original {
                 h.vault.write_atomic(&path, rewritten.as_bytes())?;
                 affected_notes += 1;
@@ -2162,6 +2156,11 @@ fn start_watcher(
 
 #[cfg(test)]
 mod tests {
+    /// A Tiptap doc (JSON) whose paragraphs are the lines of `text`.
+    fn doc(text: &str) -> String {
+        notium_core::envelope::doc_from_text(text).to_string()
+    }
+
     use super::*;
 
     fn test_handle() -> (tempfile::TempDir, VaultHandle) {
@@ -2173,9 +2172,9 @@ mod tests {
     #[test]
     fn create_read_save_roundtrip() {
         let (_dir, mut h) = test_handle();
-        let created = create_impl(&mut h, "markdown", Some("Idea"), None).unwrap();
+        let created = create_impl(&mut h, "tiptap", Some("Idea"), None).unwrap();
         assert_eq!(created.rev, 0);
-        assert_eq!(created.note.format, "markdown");
+        assert_eq!(created.note.format, "tiptap");
         assert!(
             created.note.updated_at.is_some(),
             "created note must immediately have updated_at"
@@ -2188,7 +2187,7 @@ mod tests {
             "the title is not repeated as a heading"
         );
 
-        let saved = save_impl(&mut h, &created.note.note_id, "# Idea\n\nhola", 0).unwrap();
+        let saved = save_impl(&mut h, &created.note.note_id, &doc("# Idea\n\nhola"), 0).unwrap();
         assert_eq!(saved.rev, 1);
         assert!(
             saved.note.updated_at.is_some(),
@@ -2202,47 +2201,53 @@ mod tests {
     #[test]
     fn save_stale_rev_conflicts() {
         let (_dir, mut h) = test_handle();
-        let created = create_impl(&mut h, "markdown", Some("A"), None).unwrap();
-        save_impl(&mut h, &created.note.note_id, "# A\n\nv1", 0).unwrap(); // rev -> 1
-        let err = save_impl(&mut h, &created.note.note_id, "# A\n\nv2", 0).unwrap_err();
+        let created = create_impl(&mut h, "tiptap", Some("A"), None).unwrap();
+        save_impl(&mut h, &created.note.note_id, &doc("# A\n\nv1"), 0).unwrap(); // rev -> 1
+        let err = save_impl(&mut h, &created.note.note_id, &doc("# A\n\nv2"), 0).unwrap_err();
         assert!(matches!(err, CommandError::Conflict));
     }
 
     #[test]
-    fn save_preserves_identity_when_frontmatter_stripped() {
+    fn save_keeps_identity_in_the_envelope() {
         let (_dir, mut h) = test_handle();
-        let created = create_impl(&mut h, "markdown", Some("A"), None).unwrap();
-        // Save content with NO frontmatter; identity must be re-injected.
-        save_impl(&mut h, &created.note.note_id, "# A\n\nsin frontmatter", 0).unwrap();
+        let created = create_impl(&mut h, "tiptap", Some("A"), None).unwrap();
+        // The editor only sends the doc; the id comes from the envelope on disk.
+        save_impl(&mut h, &created.note.note_id, &doc("# A\n\nsin id"), 0).unwrap();
         let bytes = h.vault.read(&created.note.path).unwrap();
         let text = String::from_utf8(bytes).unwrap();
-        assert!(text.contains("notium_id:"));
+        assert_eq!(
+            envelope::notium_id(&text).as_deref(),
+            Some(created.note.note_id.as_str())
+        );
         // And the note keeps its id.
         let rec = h.index.get_note(&created.note.note_id).unwrap().unwrap();
         assert_eq!(rec.note_id, created.note.note_id);
     }
 
     #[test]
-    fn markdown_editor_receives_body_only_and_save_preserves_the_yaml_envelope() {
+    fn editor_receives_the_doc_only_and_save_keeps_the_envelope() {
         let (_dir, mut h) = test_handle();
-        let created = create_impl(&mut h, "markdown", Some("A"), None).unwrap();
-        assert!(!created.content.starts_with("---"));
-        assert_eq!(created.content, "");
-        save_impl(&mut h, &created.note.note_id, "# Edited body\n", 0).unwrap();
+        let created = create_impl(&mut h, "tiptap", Some("A"), None).unwrap();
+        assert_eq!(created.content, r#"{"type":"doc","content":[]}"#);
+        save_impl(&mut h, &created.note.note_id, &doc("# Edited body\n"), 0).unwrap();
         let raw = String::from_utf8(h.vault.read(&created.note.path).unwrap()).unwrap();
-        assert!(raw.starts_with("---\nnotium_id:"));
-        assert!(raw.contains("created:"));
-        assert!(raw.ends_with("# Edited body\n"));
+        assert!(raw.starts_with("{\n  \"notium_id\""));
+        assert!(envelope::field(&raw, "created").is_some());
+        assert_eq!(envelope::doc_json(&raw), doc("# Edited body\n"));
         assert_eq!(
             read_impl(&h, &created.note.note_id).unwrap().content,
-            "# Edited body\n"
+            doc("# Edited body\n")
         );
+        // A malformed doc is refused and the file is left as it was.
+        assert!(save_impl(&mut h, &created.note.note_id, "# not json", 1).is_err());
+        let after = String::from_utf8(h.vault.read(&created.note.path).unwrap()).unwrap();
+        assert_eq!(after, raw);
     }
 
     #[test]
     fn rename_keeps_identity_and_alias() {
         let (_dir, mut h) = test_handle();
-        let created = create_impl(&mut h, "markdown", Some("Idea"), None).unwrap();
+        let created = create_impl(&mut h, "tiptap", Some("Idea"), None).unwrap();
         let summary = rename_impl(&mut h, &created.note.note_id, "Concepto").unwrap();
         assert_eq!(summary.title, "Concepto");
         // old title resolves via alias
@@ -2253,7 +2258,7 @@ mod tests {
     #[test]
     fn delete_tombstones() {
         let (_dir, mut h) = test_handle();
-        let created = create_impl(&mut h, "markdown", Some("A"), None).unwrap();
+        let created = create_impl(&mut h, "tiptap", Some("A"), None).unwrap();
         delete_impl(&mut h, &created.note.note_id).unwrap();
         assert!(h.sync.is_tombstoned(&created.note.note_id).unwrap());
         assert!(
@@ -2273,8 +2278,8 @@ mod tests {
     #[test]
     fn delete_folder_journals_delete_ops() {
         let (_dir, mut h) = test_handle();
-        let a = create_impl(&mut h, "markdown", Some("A"), Some("sub")).unwrap();
-        let b = create_impl(&mut h, "markdown", Some("B"), Some("sub")).unwrap();
+        let a = create_impl(&mut h, "tiptap", Some("A"), Some("sub")).unwrap();
+        let b = create_impl(&mut h, "tiptap", Some("B"), Some("sub")).unwrap();
 
         delete_folder_impl(&mut h, "sub", false).unwrap();
 
@@ -2290,9 +2295,15 @@ mod tests {
     #[test]
     fn search_and_backlinks() {
         let (_dir, mut h) = test_handle();
-        let a = create_impl(&mut h, "markdown", Some("A"), None).unwrap();
-        let b = create_impl(&mut h, "markdown", Some("B"), None).unwrap();
-        save_impl(&mut h, &a.note.note_id, "# A\n\nSee [[B]] and #work.", 0).unwrap();
+        let a = create_impl(&mut h, "tiptap", Some("A"), None).unwrap();
+        let b = create_impl(&mut h, "tiptap", Some("B"), None).unwrap();
+        save_impl(
+            &mut h,
+            &a.note.note_id,
+            &doc("# A\n\nSee [[B]] and #work."),
+            0,
+        )
+        .unwrap();
 
         let hits = search_impl(&h, "B", None, None).unwrap();
         assert!(!hits.is_empty());
@@ -2306,9 +2317,9 @@ mod tests {
     #[test]
     fn suggest_titles_filters_by_prefix() {
         let (_dir, mut h) = test_handle();
-        create_impl(&mut h, "markdown", Some("Proyecto"), None).unwrap();
-        create_impl(&mut h, "markdown", Some("Trabajo"), None).unwrap();
-        create_impl(&mut h, "markdown", Some("Procesos"), None).unwrap();
+        create_impl(&mut h, "tiptap", Some("Proyecto"), None).unwrap();
+        create_impl(&mut h, "tiptap", Some("Trabajo"), None).unwrap();
+        create_impl(&mut h, "tiptap", Some("Procesos"), None).unwrap();
 
         let all = h.index.suggest_titles("", 500).unwrap();
         assert_eq!(all.len(), 3);
@@ -2330,12 +2341,14 @@ mod tests {
     #[test]
     fn external_disk_edit_reconciles() {
         let (_dir, mut h) = test_handle();
-        let created = create_impl(&mut h, "markdown", Some("A"), None).unwrap();
+        let created = create_impl(&mut h, "tiptap", Some("A"), None).unwrap();
         let note_id = created.note.note_id.clone();
         let path = created.note.path.clone();
 
         // Simulate an external tool rewriting the file (bypassing our write path).
-        std::fs::write(h.vault.root.join(&path), b"# A\n\neditado fuera\n").unwrap();
+        let old = String::from_utf8(h.vault.read(&path).unwrap()).unwrap();
+        let edited = envelope::with_doc(&old, &doc("# A\n\neditado fuera")).unwrap();
+        std::fs::write(h.vault.root.join(&path), edited).unwrap();
 
         // Reconcile (what the watcher / resume hook triggers) and re-read.
         h.index.reconcile(&h.vault).unwrap();
@@ -2354,9 +2367,9 @@ mod tests {
     fn create_folder_and_note_in_folder() {
         let (_dir, mut h) = test_handle();
         let folder = h.vault.create_folder("Proyectos").unwrap();
-        assert_eq!(folder, "notes/markdown/Proyectos");
-        let created = create_impl(&mut h, "markdown", Some("Plan"), Some("Proyectos")).unwrap();
-        assert_eq!(created.note.path, "notes/markdown/Proyectos/Plan.md");
+        assert_eq!(folder, "notes/tiptap/Proyectos");
+        let created = create_impl(&mut h, "tiptap", Some("Plan"), Some("Proyectos")).unwrap();
+        assert_eq!(created.note.path, "notes/tiptap/Proyectos/Plan.json");
     }
 
     #[test]
@@ -2366,7 +2379,7 @@ mod tests {
         assert!(list_folders_impl(&h)
             .unwrap()
             .iter()
-            .any(|f| f.path == "notes/markdown/Empty folder"));
+            .any(|f| f.path == "notes/tiptap/Empty folder"));
         assert_eq!(vault_info(&h).unwrap().folders, 1);
     }
 
@@ -2374,20 +2387,20 @@ mod tests {
     fn rename_and_delete_folder_with_keep_or_trash_and_move_to_vault() {
         let (_dir, mut h) = test_handle();
         h.vault.create_folder("Proyectos").unwrap();
-        let n1 = create_impl(&mut h, "markdown", Some("Idea 1"), Some("Proyectos")).unwrap();
-        let n2 = create_impl(&mut h, "markdown", Some("Idea 2"), Some("Proyectos")).unwrap();
+        let n1 = create_impl(&mut h, "tiptap", Some("Idea 1"), Some("Proyectos")).unwrap();
+        let n2 = create_impl(&mut h, "tiptap", Some("Idea 2"), Some("Proyectos")).unwrap();
 
         // 1. Rename folder "Proyectos" -> "Archivo"
         let renamed = rename_folder_impl(&mut h, "Proyectos", "Archivo").unwrap();
         assert_eq!(renamed, "Archivo");
         let r1 = h.index.get_note(&n1.note.note_id).unwrap().unwrap();
-        assert_eq!(r1.path, "notes/markdown/Archivo/Idea 1.md");
+        assert_eq!(r1.path, "notes/tiptap/Archivo/Idea 1.json");
 
-        // 2. Delete folder "Archivo" keeping content -> notes move to root `notes/markdown/`
+        // 2. Delete folder "Archivo" keeping content -> notes move to root `notes/tiptap/`
         let moved_count = delete_folder_impl(&mut h, "Archivo", true).unwrap();
         assert_eq!(moved_count, 2);
         let r1_after = h.index.get_note(&n1.note.note_id).unwrap().unwrap();
-        assert_eq!(r1_after.path, "notes/markdown/Idea 1.md");
+        assert_eq!(r1_after.path, "notes/tiptap/Idea 1.json");
 
         // 3. Move notes into a new folder "Borrar" and delete folder without keeping content
         move_impl(&mut h, &n1.note.note_id, "Borrar").unwrap();
@@ -2417,26 +2430,26 @@ mod tests {
         );
         h2.index.reconcile(&h2.vault).unwrap();
         let in_dest = h2.index.get_note(&n2.note.note_id).unwrap().unwrap();
-        assert_eq!(in_dest.path, "notes/markdown/Exportar/Idea 2.md");
+        assert_eq!(in_dest.path, "notes/tiptap/Exportar/Idea 2.json");
     }
 
     #[test]
     fn unlinked_mentions_excludes_explicit_links() {
         let (_dir, mut h) = test_handle();
-        let target = create_impl(&mut h, "markdown", Some("Destino"), None).unwrap();
-        let linked = create_impl(&mut h, "markdown", Some("Vinculado"), None).unwrap();
-        let mentioned = create_impl(&mut h, "markdown", Some("Mencionado"), None).unwrap();
+        let target = create_impl(&mut h, "tiptap", Some("Destino"), None).unwrap();
+        let linked = create_impl(&mut h, "tiptap", Some("Vinculado"), None).unwrap();
+        let mentioned = create_impl(&mut h, "tiptap", Some("Mencionado"), None).unwrap();
         save_impl(
             &mut h,
             &linked.note.note_id,
-            "# Vinculado\n\nVer [[Destino]].",
+            &doc("# Vinculado\n\nVer [[Destino]]."),
             0,
         )
         .unwrap();
         save_impl(
             &mut h,
             &mentioned.note.note_id,
-            "# Mencionado\n\nHablamos de Destino aquí.",
+            &doc("# Mencionado\n\nHablamos de Destino aquí."),
             0,
         )
         .unwrap();
@@ -2484,8 +2497,14 @@ mod tests {
         assert!(list1[0].referencing_notes.is_empty());
 
         // Reference it from a note
-        let note = create_impl(&mut h, "markdown", Some("Mi Nota"), None).unwrap();
-        save_impl(&mut h, &note.note.note_id, "# Mi Nota\n\n![[photo.jpg]]", 0).unwrap();
+        let note = create_impl(&mut h, "tiptap", Some("Mi Nota"), None).unwrap();
+        save_impl(
+            &mut h,
+            &note.note.note_id,
+            &doc("# Mi Nota\n\n![[photo.jpg]]"),
+            0,
+        )
+        .unwrap();
 
         let list2 = attachment_list_impl(&h).unwrap();
         assert_eq!(list2.len(), 1);
@@ -2497,13 +2516,13 @@ mod tests {
     #[test]
     fn outlinks_and_link_repair_lifecycle() {
         let (_dir, mut h) = test_handle();
-        let _target = create_impl(&mut h, "markdown", Some("Destino"), None).unwrap();
-        let source = create_impl(&mut h, "markdown", Some("Origen"), None).unwrap();
+        let _target = create_impl(&mut h, "tiptap", Some("Destino"), None).unwrap();
+        let source = create_impl(&mut h, "tiptap", Some("Origen"), None).unwrap();
 
         save_impl(
             &mut h,
             &source.note.note_id,
-            "# Origen\n\nVer [[Destino]] y [[Destino#Capitulo|Cap]] y [[Nota Inexistente]].",
+            &doc("# Origen\n\nVer [[Destino]] y [[Destino#Capitulo|Cap]] y [[Nota Inexistente]]."),
             0,
         )
         .unwrap();

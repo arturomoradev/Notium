@@ -95,6 +95,55 @@ pub fn rewrite_wikilink_targets(
     (out, count)
 }
 
+/// Rewrite links to a renamed note inside a note file (Tiptap JSON): the
+/// `target` of `wikiLink` nodes and any `[[..]]` typed as plain text.
+/// Text that is not a JSON note is returned unchanged with a count of 0.
+pub fn rewrite_note_links(file: &str, old_title: &str, new_title: &str) -> (String, usize) {
+    fn walk(node: &mut serde_json::Value, old: &str, new: &str, count: &mut usize) {
+        let kind = node
+            .get("type")
+            .and_then(|t| t.as_str())
+            .unwrap_or("")
+            .to_string();
+        if kind == "wikiLink" {
+            if let Some(t) = node.pointer_mut("/attrs/target") {
+                let target = t.as_str().unwrap_or("").to_string();
+                let (out, n) = rewrite_wikilink_targets(&format!("[[{target}]]"), old, new);
+                if n > 0 {
+                    *t = serde_json::Value::String(out[2..out.len() - 2].to_string());
+                    *count += n;
+                }
+            }
+        } else if kind == "text" {
+            if let Some(t) = node.get_mut("text") {
+                let (out, n) = rewrite_wikilink_targets(t.as_str().unwrap_or(""), old, new);
+                if n > 0 {
+                    *t = serde_json::Value::String(out);
+                    *count += n;
+                }
+            }
+        }
+        match node {
+            serde_json::Value::Object(m) => m.values_mut().for_each(|v| walk(v, old, new, count)),
+            serde_json::Value::Array(a) => a.iter_mut().for_each(|v| walk(v, old, new, count)),
+            _ => {}
+        }
+    }
+    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(file) else {
+        return (file.to_string(), 0);
+    };
+    let mut count = 0;
+    if let Some(doc) = value.get_mut("doc") {
+        walk(doc, old_title, new_title, &mut count);
+    }
+    if count == 0 {
+        return (file.to_string(), 0);
+    }
+    let mut out = serde_json::to_string_pretty(&value).unwrap_or_default();
+    out.push('\n');
+    (out, count)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -125,6 +174,21 @@ mod tests {
         assert_eq!(
             output,
             "Consulta [[Diseño Visual]] y [[Diseño Visual#Herramientas]]."
+        );
+    }
+
+    #[test]
+    fn rewrite_note_links_updates_nodes_and_text() {
+        let file = r#"{"notium_id":"n","doc":{"type":"doc","content":[{"type":"paragraph","content":[
+            {"type":"wikiLink","attrs":{"target":"Notas#Intro|Mis notas","embed":false}},
+            {"type":"text","text":" y [[notas]] y [[Otra]]"}]}]}}"#;
+        let (out, count) = rewrite_note_links(file, "Notas", "Apuntes");
+        assert_eq!(count, 2);
+        assert!(out.contains("\"Apuntes#Intro|Mis notas\""));
+        assert!(out.contains("y [[Apuntes]] y [[Otra]]"));
+        assert_eq!(
+            rewrite_note_links("not json", "Notas", "X"),
+            ("not json".into(), 0)
         );
     }
 }

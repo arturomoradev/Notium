@@ -1,7 +1,7 @@
 {
   "note_id": "note_frontmatter-unknown",
   "title": "Body",
-  "editor": "markdown",
+  "editor": "tiptap",
   "meta": {
     "created_at": null,
     "updated_at": null,

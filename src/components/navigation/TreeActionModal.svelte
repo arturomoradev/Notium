@@ -1,6 +1,6 @@
 <script lang="ts">
   import { call } from "../../lib/ipc/commands";
-  import { invalidateEmbedCache } from "../editors/markdownEngine";
+  import { invalidateEmbedCache } from "../editors/noteEngine";
   import LinkRepairModal from "../modals/LinkRepairModal.svelte";
   import {
     folderOf,

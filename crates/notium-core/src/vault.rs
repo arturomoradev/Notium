@@ -11,11 +11,11 @@ pub use crate::paths::{sanitize_folder_path, sanitize_title, title_from_path};
 
 use serde::{Deserialize, Serialize};
 
+use crate::envelope;
 use crate::extract::EditorKind;
-use crate::frontmatter;
 use crate::hash;
 
-pub const NOTES_MD: &str = "notes/markdown";
+pub const NOTES_DIR: &str = "notes/tiptap";
 pub const ATTACHMENTS: &str = "attachments";
 pub const APP_DIR: &str = ".app";
 pub const INDEX_DB: &str = "index.db";
@@ -29,11 +29,11 @@ const TRASH_PATH_SEP: &str = "___";
 fn encode_trash_rel_path(rel_path: &str) -> String {
     let normalized = rel_path.replace('\\', "/");
     let sub = normalized
-        .strip_prefix("notes/markdown/")
+        .strip_prefix("notes/tiptap/")
         .unwrap_or(&normalized);
     let cleaned = sub.trim_matches('/');
     if cleaned.is_empty() {
-        "note.md".to_string()
+        "note.json".to_string()
     } else {
         cleaned.replace('/', TRASH_PATH_SEP)
     }
@@ -45,12 +45,12 @@ fn decode_trash_rel_path(encoded: &str) -> (String, String) {
         .filter(|s| !s.is_empty() && *s != "." && *s != "..")
         .collect();
     if parts.is_empty() {
-        return (String::new(), "Nota restaurada.md".to_string());
+        return (String::new(), "Nota restaurada.json".to_string());
     }
     let file_name = parts
         .last()
         .copied()
-        .unwrap_or("Nota restaurada.md")
+        .unwrap_or("Nota restaurada.json")
         .to_string();
     let folder = if parts.len() > 1 {
         parts[..parts.len() - 1].join("/")
@@ -173,7 +173,7 @@ impl LocalVault {
 
     /// Create the canonical directory structure + default settings if absent.
     pub fn init(&self) -> io::Result<()> {
-        for dir in [NOTES_MD, ATTACHMENTS] {
+        for dir in [NOTES_DIR, ATTACHMENTS] {
             fs::create_dir_all(self.root.join(dir))?;
         }
         let app = self.root.join(APP_DIR);
@@ -299,7 +299,7 @@ impl LocalVault {
             let remaining_secs = TRASH_RETENTION_SECS.saturating_sub(elapsed);
             let days_remaining = remaining_secs.div_ceil(86_400).clamp(1, 30) as u32;
             let bytes = fs::read(&path).unwrap_or_default();
-            let note_id = extract_embedded_id(&bytes, EditorKind::Markdown);
+            let note_id = extract_embedded_id(&bytes, EditorKind::Tiptap);
             let orig_encoded = trash_id
                 .split_once('-')
                 .map(|(_, rest)| rest)
@@ -327,7 +327,7 @@ impl LocalVault {
     }
 
     /// Restore a file from `.app/trash/` back to its original subfolder under
-    /// `notes/markdown/` (deduplicating the filename if needed) and return
+    /// `notes/tiptap/` (deduplicating the filename if needed) and return
     /// `(restored_rel_path, embedded_note_id)`.
     pub fn restore_from_trash(&self, trash_id: &str) -> io::Result<(String, Option<String>)> {
         if trash_id.contains("..") || trash_id.contains('/') || trash_id.contains('\\') {
@@ -344,7 +344,7 @@ impl LocalVault {
             ));
         }
         let bytes = fs::read(&src)?;
-        let note_id = extract_embedded_id(&bytes, EditorKind::Markdown);
+        let note_id = extract_embedded_id(&bytes, EditorKind::Tiptap);
         let orig_encoded = trash_id
             .split_once('-')
             .map(|(_, rest)| rest)
@@ -357,11 +357,11 @@ impl LocalVault {
         let title = sanitize_title(&stem);
         let clean_folder = sanitize_folder_path(&folder).unwrap_or_default();
         let target_dir = if clean_folder.is_empty() {
-            NOTES_MD.to_string()
+            NOTES_DIR.to_string()
         } else {
-            format!("{NOTES_MD}/{clean_folder}")
+            format!("{NOTES_DIR}/{clean_folder}")
         };
-        let rel = self.dedup_path(&target_dir, &title, "md");
+        let rel = self.dedup_path(&target_dir, &title, "json");
         let dst = self.root.join(&rel);
         if let Some(parent) = dst.parent() {
             fs::create_dir_all(parent)?;
@@ -429,7 +429,7 @@ impl LocalVault {
     /// Metadata-only scan of the notes (no file contents are read).
     pub fn scan_note_meta(&self) -> io::Result<Vec<(FileMeta, EditorKind)>> {
         let mut out = Vec::new();
-        for path in walk_files(&self.root.join(NOTES_MD))? {
+        for path in walk_files(&self.root.join(NOTES_DIR))? {
             let rel = rel_path(&self.root, &path);
             if let Some(editor) = crate::extract::editor_from_path(&rel) {
                 out.push((file_meta(rel, &path)?, editor));
@@ -579,22 +579,18 @@ fn rel_path(root: &Path, abs: &Path) -> String {
 /// Extract the embedded `notium_id` from file bytes.
 pub fn extract_embedded_id(bytes: &[u8], editor: EditorKind) -> Option<String> {
     match editor {
-        EditorKind::Markdown => {
-            let text = std::str::from_utf8(bytes).ok()?;
-            let (fm, _) = frontmatter::split(text);
-            fm.as_deref().and_then(frontmatter::notium_id)
-        }
+        EditorKind::Tiptap => envelope::notium_id(std::str::from_utf8(bytes).ok()?),
     }
 }
 
 /// Inject an identity into file bytes, returning new bytes.
 ///
-/// Surgical single-line frontmatter injection (byte-preserving).
+/// None when the bytes are not a note envelope (the file is left alone).
 pub fn inject_id(bytes: &[u8], editor: EditorKind, id: &str) -> Option<Vec<u8>> {
     match editor {
-        EditorKind::Markdown => {
+        EditorKind::Tiptap => {
             let text = std::str::from_utf8(bytes).ok()?;
-            Some(frontmatter::inject_notium_id(text, id).into_bytes())
+            envelope::is_note(text).then(|| envelope::inject_notium_id(text, id).into_bytes())
         }
     }
 }
@@ -648,7 +644,7 @@ impl LocalVault {
         folder: &str,
     ) -> io::Result<String> {
         let (dir, ext) = match editor {
-            EditorKind::Markdown => (NOTES_MD, "md"),
+            EditorKind::Tiptap => (NOTES_DIR, "json"),
         };
         let title = sanitize_title(title);
         let folder = sanitize_folder_path(folder)?;
@@ -660,10 +656,8 @@ impl LocalVault {
         let rel = self.dedup_path(&base, &title, ext);
         let ts = now_ts();
         let bytes = match editor {
-            EditorKind::Markdown => {
-                // No `# title` heading: the editor shows the file name as the title.
-                format!("---\nnotium_id: {id}\ncreated: {ts}\nupdated: {ts}\n---\n").into_bytes()
-            }
+            // No title heading: the editor shows the file name as the title.
+            EditorKind::Tiptap => envelope::new_note(id, &ts, envelope::empty_doc()).into_bytes(),
         };
         self.write_atomic(&rel, &bytes)?;
         Ok(rel)
@@ -678,14 +672,14 @@ impl LocalVault {
         } else {
             folder
         };
-        let rel = format!("{NOTES_MD}/{folder}");
+        let rel = format!("{NOTES_DIR}/{folder}");
         fs::create_dir_all(self.root.join(&rel))?;
         Ok(rel)
     }
 
-    /// Rename a subfolder under `notes/markdown` (either changing its leaf name
+    /// Rename a subfolder under `notes/tiptap` (either changing its leaf name
     /// or moving it to a new relative folder path) and return the new relative
-    /// folder path (without the `notes/markdown/` prefix).
+    /// folder path (without the `notes/tiptap/` prefix).
     pub fn rename_folder(&self, folder: &str, new_name: &str) -> io::Result<String> {
         let old_clean = sanitize_folder_path(folder)?;
         if old_clean.is_empty() {
@@ -694,7 +688,7 @@ impl LocalVault {
                 "cannot rename root folder",
             ));
         }
-        let src_dir = self.root.join(NOTES_MD).join(&old_clean);
+        let src_dir = self.root.join(NOTES_DIR).join(&old_clean);
         if !src_dir.exists() {
             return Err(io::Error::new(io::ErrorKind::NotFound, "folder not found"));
         }
@@ -707,7 +701,7 @@ impl LocalVault {
             ));
         }
         // If `new_name` has no slashes, rename within the same parent folder;
-        // otherwise treat it as a full folder path relative to `notes/markdown`.
+        // otherwise treat it as a full folder path relative to `notes/tiptap`.
         let new_clean = if !new_clean_input.contains('/') {
             match old_clean.rsplit_once('/') {
                 Some((parent, _)) => format!("{parent}/{new_clean_input}"),
@@ -727,7 +721,7 @@ impl LocalVault {
             ));
         }
 
-        let dst_dir = self.root.join(NOTES_MD).join(&new_clean);
+        let dst_dir = self.root.join(NOTES_DIR).join(&new_clean);
         if dst_dir.exists() {
             return Err(io::Error::new(
                 io::ErrorKind::AlreadyExists,
@@ -741,10 +735,10 @@ impl LocalVault {
         Ok(new_clean)
     }
 
-    /// Delete a subfolder under `notes/markdown`.
+    /// Delete a subfolder under `notes/tiptap`.
     ///
     /// - When `keep_content` is `true`, all notes inside `folder` (and its nested
-    ///   subfolders) are moved into the parent folder (or root of `notes/markdown`),
+    ///   subfolders) are moved into the parent folder (or root of `notes/tiptap`),
     ///   deduplicating filenames if needed, before removing the folder directory.
     /// - When `keep_content` is `false`, all notes inside `folder` are moved to
     ///   `.app/trash/` (preserving their original paths for 30-day restore) and
@@ -757,7 +751,7 @@ impl LocalVault {
                 "cannot delete root folder",
             ));
         }
-        let target_dir = self.root.join(NOTES_MD).join(&clean);
+        let target_dir = self.root.join(NOTES_DIR).join(&clean);
         if !target_dir.exists() {
             return Err(io::Error::new(io::ErrorKind::NotFound, "folder not found"));
         }
@@ -810,9 +804,9 @@ impl LocalVault {
         fs::rename(self.root.join(from), dst)
     }
 
-    /// Move a note into a subfolder of `notes/markdown` (deduplicating the filename).
+    /// Move a note into a subfolder of `notes/tiptap` (deduplicating the filename).
     pub fn move_note(&self, rel_path: &str, folder: &str) -> io::Result<String> {
-        let dir = NOTES_MD;
+        let dir = NOTES_DIR;
         let title = title_from_path(rel_path);
         let ext = Path::new(rel_path)
             .extension()
@@ -868,18 +862,18 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let v = LocalVault::new(dir.path());
         v.init().unwrap();
-        let nfd_dir = v.root.join(NOTES_MD).join("Me\u{301}xico");
+        let nfd_dir = v.root.join(NOTES_DIR).join("Me\u{301}xico");
         fs::create_dir_all(&nfd_dir).unwrap();
-        fs::write(nfd_dir.join("Cafe\u{301}.md"), "hola").unwrap();
+        fs::write(nfd_dir.join("Cafe\u{301}.json"), "hola").unwrap();
         let paths: Vec<String> = v
             .scan_note_meta()
             .unwrap()
             .into_iter()
             .map(|(m, _)| m.rel_path)
             .collect();
-        assert_eq!(paths, vec!["notes/markdown/M\u{e9}xico/Caf\u{e9}.md"]);
+        assert_eq!(paths, vec!["notes/tiptap/M\u{e9}xico/Caf\u{e9}.json"]);
         assert_eq!(
-            v.read("notes/markdown/M\u{e9}xico/Caf\u{e9}.md").unwrap(),
+            v.read("notes/tiptap/M\u{e9}xico/Caf\u{e9}.json").unwrap(),
             b"hola"
         );
     }
@@ -889,7 +883,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let v = LocalVault::new(dir.path());
         v.init().unwrap();
-        assert!(v.root.join(NOTES_MD).exists());
+        assert!(v.root.join(NOTES_DIR).exists());
         assert!(v.root.join(ATTACHMENTS).exists());
         assert!(v.app_dir().join(SETTINGS).exists());
         assert!(!v.read_settings().unwrap().source_mode);
@@ -907,8 +901,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let v = LocalVault::new(dir.path());
         v.init().unwrap();
-        v.write_atomic("notes/markdown/A.md", b"hello").unwrap();
-        assert_eq!(v.read("notes/markdown/A.md").unwrap(), b"hello");
+        v.write_atomic("notes/tiptap/A.json", b"hello").unwrap();
+        assert_eq!(v.read("notes/tiptap/A.json").unwrap(), b"hello");
     }
 
     #[test]
@@ -916,21 +910,27 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let v = LocalVault::new(dir.path());
         v.init().unwrap();
-        v.write_atomic("notes/markdown/A.md", b"# A").unwrap();
+        v.write_atomic(
+            "notes/tiptap/A.json",
+            crate::envelope::note_from_text(&String::from_utf8_lossy(b"# A".as_ref())).as_bytes(),
+        )
+        .unwrap();
         v.write_atomic("attachments/x.jpg", b"jpg").unwrap();
         let notes = v.scan_notes().unwrap();
         assert_eq!(notes.len(), 1);
         assert_eq!(v.scan_attachments().unwrap().len(), 1);
-        assert!(notes.iter().any(|n| n.editor == EditorKind::Markdown));
+        assert!(notes.iter().any(|n| n.editor == EditorKind::Tiptap));
     }
 
     #[test]
-    fn extract_and_inject_md_identity() {
-        let md = b"---\ntitle: X\n---\nbody";
-        assert_eq!(extract_embedded_id(md, EditorKind::Markdown), None);
-        let injected = inject_id(md, EditorKind::Markdown, "note_1").unwrap();
+    fn extract_and_inject_identity() {
+        let note = crate::envelope::note_from_text("---\ntitle: X\n---\nbody");
+        let note = note.as_bytes();
+        assert_eq!(extract_embedded_id(note, EditorKind::Tiptap), None);
+        assert_eq!(inject_id(b"not json", EditorKind::Tiptap, "note_1"), None);
+        let injected = inject_id(note, EditorKind::Tiptap, "note_1").unwrap();
         assert_eq!(
-            extract_embedded_id(&injected, EditorKind::Markdown),
+            extract_embedded_id(&injected, EditorKind::Tiptap),
             Some("note_1".into())
         );
     }
@@ -943,16 +943,17 @@ mod tests {
     }
 
     #[test]
-    fn create_note_md() {
+    fn create_note_json() {
         let dir = tempfile::tempdir().unwrap();
         let v = LocalVault::new(dir.path());
         v.init().unwrap();
         let md = v
-            .create_note(EditorKind::Markdown, "Idea", "note_md")
+            .create_note(EditorKind::Tiptap, "Idea", "note_md")
             .unwrap();
-        assert_eq!(md, "notes/markdown/Idea.md");
+        assert_eq!(md, "notes/tiptap/Idea.json");
         let s = String::from_utf8(v.read(&md).unwrap()).unwrap();
-        assert!(s.contains("notium_id: note_md"));
+        assert_eq!(crate::envelope::notium_id(&s).as_deref(), Some("note_md"));
+        assert!(crate::envelope::is_note(&s));
     }
 
     #[test]
@@ -960,10 +961,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let v = LocalVault::new(dir.path());
         v.init().unwrap();
-        v.create_note(EditorKind::Markdown, "A", "note_1").unwrap();
-        v.create_note(EditorKind::Markdown, "B", "note_2").unwrap();
-        let renamed = v.rename_note("notes/markdown/A.md", "B").unwrap();
-        assert_eq!(renamed, "notes/markdown/B 2.md");
+        v.create_note(EditorKind::Tiptap, "A", "note_1").unwrap();
+        v.create_note(EditorKind::Tiptap, "B", "note_2").unwrap();
+        let renamed = v.rename_note("notes/tiptap/A.json", "B").unwrap();
+        assert_eq!(renamed, "notes/tiptap/B 2.json");
     }
 
     #[test]
@@ -973,18 +974,16 @@ mod tests {
         v.init().unwrap();
 
         let created_folder = v.create_folder("Proyectos/2026").unwrap();
-        assert_eq!(created_folder, "notes/markdown/Proyectos/2026");
+        assert_eq!(created_folder, "notes/tiptap/Proyectos/2026");
 
-        let note = v
-            .create_note(EditorKind::Markdown, "Plan", "note_1")
-            .unwrap();
+        let note = v.create_note(EditorKind::Tiptap, "Plan", "note_1").unwrap();
         let moved = v.move_note(&note, "Proyectos/2026/Sub").unwrap();
-        assert_eq!(moved, "notes/markdown/Proyectos/2026/Sub/Plan.md");
+        assert_eq!(moved, "notes/tiptap/Proyectos/2026/Sub/Plan.json");
         assert!(v.root.join(&moved).exists());
 
         assert!(v.create_folder("../outside").is_err());
         assert!(v
-            .create_note_in(EditorKind::Markdown, "X", "note_2", "../outside")
+            .create_note_in(EditorKind::Tiptap, "X", "note_2", "../outside")
             .is_err());
         assert!(v.move_note(&moved, "../../escape").is_err());
     }
@@ -996,7 +995,7 @@ mod tests {
         v.init().unwrap();
 
         let n1 = v
-            .create_note(EditorKind::Markdown, "Reciente", "note_recent")
+            .create_note(EditorKind::Tiptap, "Reciente", "note_recent")
             .unwrap();
         v.delete_to_trash(&n1).unwrap();
 
@@ -1005,7 +1004,7 @@ mod tests {
         let old_ts = now - (31 * 24 * 60 * 60);
         let trash_dir = v.app_dir().join(TRASH);
         let old_file = trash_dir.join(format!(
-            "{old_ts}_{}-Antigua.md",
+            "{old_ts}_{}-Antigua.json",
             uuid::Uuid::now_v7().simple()
         ));
         fs::write(&old_file, b"# Antigua").unwrap();
@@ -1013,7 +1012,7 @@ mod tests {
         // Simulate a note deleted 10 days ago (20 days remaining)
         let mid_ts = now - (10 * 24 * 60 * 60);
         let mid_file = trash_dir.join(format!(
-            "{mid_ts}_{}-Media.md",
+            "{mid_ts}_{}-Media.json",
             uuid::Uuid::now_v7().simple()
         ));
         fs::write(&mid_file, b"# Media").unwrap();
@@ -1037,14 +1036,9 @@ mod tests {
         v.init().unwrap();
 
         let rel = v
-            .create_note_in(
-                EditorKind::Markdown,
-                "Plan Q4",
-                "note_sub",
-                "Proyectos/2026",
-            )
+            .create_note_in(EditorKind::Tiptap, "Plan Q4", "note_sub", "Proyectos/2026")
             .unwrap();
-        assert_eq!(rel, "notes/markdown/Proyectos/2026/Plan Q4.md");
+        assert_eq!(rel, "notes/tiptap/Proyectos/2026/Plan Q4.json");
 
         v.delete_to_trash(&rel).unwrap();
         let trash_items = v.list_trash().unwrap();
@@ -1052,7 +1046,7 @@ mod tests {
         assert_eq!(trash_items[0].title, "Plan Q4");
 
         let (restored_rel, restored_id) = v.restore_from_trash(&trash_items[0].trash_id).unwrap();
-        assert_eq!(restored_rel, "notes/markdown/Proyectos/2026/Plan Q4.md");
+        assert_eq!(restored_rel, "notes/tiptap/Proyectos/2026/Plan Q4.json");
         assert_eq!(restored_id, Some("note_sub".to_string()));
         assert!(v.root.join(&restored_rel).exists());
     }

@@ -1,0 +1,25 @@
+{
+  "title": "Frontmatter",
+  "custom_key": "keep me",
+  "tags": [
+    "alpha",
+    "beta"
+  ],
+  "doc": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 1
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Body"
+          }
+        ]
+      }
+    ]
+  }
+}

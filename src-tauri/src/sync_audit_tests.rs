@@ -65,7 +65,8 @@ fn rev_of(h: &VaultHandle, id: &str) -> u64 {
 
 fn save(h: &mut VaultHandle, id: &str, body: &str) {
     let rev = rev_of(h, id);
-    crate::commands::save_impl(h, id, body, rev).unwrap();
+    let doc = notium_core::envelope::doc_from_text(body).to_string();
+    crate::commands::save_impl(h, id, &doc, rev).unwrap();
 }
 
 /// Live notes as (id, file contents), sorted by id.
@@ -97,7 +98,7 @@ type Pair = (
 fn shared_note(body: &str) -> Pair {
     let (da, mut a) = device();
     let (db, mut b) = device();
-    let id = crate::commands::create_impl(&mut a, "markdown", Some("Plan"), None)
+    let id = crate::commands::create_impl(&mut a, "tiptap", Some("Plan"), None)
         .unwrap()
         .note
         .note_id;
@@ -118,7 +119,7 @@ fn conflict_keeps_the_note_id_and_gives_the_copy_its_own() {
     for h in [&a, &b] {
         let doc = doc_of(h, &id);
         assert_eq!(
-            vault::extract_embedded_id(doc.as_bytes(), EditorKind::Markdown).as_deref(),
+            vault::extract_embedded_id(doc.as_bytes(), EditorKind::Tiptap).as_deref(),
             Some(id.as_str()),
             "the note lost its id:\n{doc}"
         );
@@ -156,7 +157,9 @@ fn disjoint_concurrent_edits_merge_and_converge() {
     settle(&mut a, &mut b);
 
     let doc = doc_of(&a, &id);
-    assert!(doc.contains("UNO\ndos\nTRES\n"), "not merged:\n{doc}");
+    let merged = notium_core::envelope::doc_json(&doc);
+    let want = notium_core::envelope::doc_from_text("UNO\ndos\nTRES\n").to_string();
+    assert_eq!(merged, want, "not merged:\n{doc}");
     assert_eq!(live_notes(&a), live_notes(&b));
     assert_eq!(
         live_notes(&a).len(),
@@ -217,8 +220,8 @@ fn copied_vault_gets_its_own_device_id() {
     let first = load_sync_config(d1.path());
     fs::create_dir_all(d2.path().join(".app")).unwrap();
     fs::copy(
-        d1.path().join(".app/sync_config.json"),
-        d2.path().join(".app/sync_config.json"),
+        d1.path().join(".app").join(crate::sync::CONFIG_FILE),
+        d2.path().join(".app").join(crate::sync::CONFIG_FILE),
     )
     .unwrap();
     let copy = load_sync_config(d2.path());
@@ -241,7 +244,7 @@ fn case_only_rename_is_applied() {
         content: Some(b"---\nnotium_id: n1\n---\n\nhola\n".to_vec()),
         hlc: clock::Hlc { ts: 10, cnt: 0 },
         ts: 10,
-        path: Some("notes/markdown/plan.md".into()),
+        path: Some("notes/tiptap/plan.json".into()),
         purge: false,
         base_hash: None,
     };
@@ -250,11 +253,11 @@ fn case_only_rename_is_applied() {
     op.kind = sync::OpKind::Update;
     op.new_rev = 1;
     op.hlc.ts = 20;
-    op.path = Some("notes/markdown/Plan.md".into());
+    op.path = Some("notes/tiptap/Plan.json".into());
     apply_pulled_ops(&mut h, &[op], "dev_local").unwrap();
     assert_eq!(
         h.index.get_note("n1").unwrap().unwrap().path,
-        "notes/markdown/Plan.md"
+        "notes/tiptap/Plan.json"
     );
 }
 
@@ -272,14 +275,14 @@ fn remote_nfd_path_is_stored_as_nfc() {
         content: Some(b"---\nnotium_id: n1\n---\n\nhola\n".to_vec()),
         hlc: clock::Hlc { ts: 10, cnt: 0 },
         ts: 10,
-        path: Some("notes/markdown/Cafe\u{301}.md".into()),
+        path: Some("notes/tiptap/Cafe\u{301}.json".into()),
         purge: false,
         base_hash: None,
     };
     apply_pulled_ops(&mut h, &[op], "dev_local").unwrap();
     assert_eq!(
         h.index.get_note("n1").unwrap().unwrap().path,
-        "notes/markdown/Caf\u{e9}.md"
+        "notes/tiptap/Caf\u{e9}.json"
     );
 }
 
@@ -359,13 +362,16 @@ fn cloud_note(id: &str, rev: u64, body: &str) -> Op {
         },
         base_rev: rev.saturating_sub(1),
         new_rev: rev,
-        content: Some(format!("---\nnotium_id: {id}\n---\n\n{body}\n").into_bytes()),
+        content: Some(
+            notium_core::envelope::note_from_text(&format!("---\nnotium_id: {id}\n---\n{body}\n"))
+                .into_bytes(),
+        ),
         hlc: clock::Hlc {
             ts: 10 + rev,
             cnt: 0,
         },
         ts: 10 + rev,
-        path: Some(format!("notes/markdown/{id}.md")),
+        path: Some(format!("notes/tiptap/{id}.json")),
         purge: false,
         base_hash: None,
     }
@@ -387,7 +393,7 @@ fn failed_push_still_pulls() {
         }
     });
     let (d, mut h) = device();
-    crate::commands::create_impl(&mut h, "markdown", Some("Local"), None).unwrap();
+    crate::commands::create_impl(&mut h, "tiptap", Some("Local"), None).unwrap();
     let (shared, root) = shared(&d, h);
     assert!(
         run_sync_cycle(&shared, &root, &cfg_for(url)).is_err(),
@@ -414,7 +420,7 @@ fn rejected_ops_stay_pending() {
         }
     });
     let (d, mut h) = device();
-    crate::commands::create_impl(&mut h, "markdown", Some("Local"), None).unwrap();
+    crate::commands::create_impl(&mut h, "tiptap", Some("Local"), None).unwrap();
     let before = h.sync.unpushed_count().unwrap();
     assert!(before > 0);
     let (shared, root) = shared(&d, h);
@@ -485,7 +491,7 @@ fn op_that_fails_to_apply_is_retried() {
     let (d, mut h) = device();
     apply_pulled_ops(&mut h, &[cloud_note("n1", 0, "original")], "dev_local").unwrap();
     h.index.reconcile(&h.vault).unwrap();
-    let file = d.path().join("notes/markdown/n1.md");
+    let file = d.path().join("notes/tiptap/n1.json");
     // The server locks the note's file while it answers the first pull, so
     // applying that pull fails; the test unlocks it after that cycle.
     let lock: Arc<Mutex<Option<Box<dyn Send>>>> = Arc::default();

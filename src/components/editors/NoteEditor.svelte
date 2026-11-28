@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
-  import { mountMarkdown, type MarkdownEngine, type MarkdownViewMode } from "./markdownEngine";
+  import { mountEditor, type NoteEngine, type EditorViewMode } from "./noteEngine";
   import type { EditorHandle } from "./engine";
 
   interface Props {
@@ -28,18 +28,18 @@
   }: Props = $props();
 
   let host: HTMLDivElement;
-  let engine: MarkdownEngine | undefined;
+  let engine: NoteEngine | undefined;
   let registeredHandle: EditorHandle | undefined;
 
   function syncMode(vm: "edit" | "reading", sm: boolean): void {
     if (!engine) return;
-    const m: MarkdownViewMode = vm === "reading" ? "reading" : sm ? "source" : "live";
+    const m: EditorViewMode = vm === "reading" ? "reading" : sm ? "source" : "live";
     engine.setMode(m);
     if (vm === "reading") engine.blur();
   }
 
   onMount(() => {
-    engine = mountMarkdown(host, { onChange, onLinkActivate, title, onRenameTitle }, "live");
+    engine = mountEditor(host, { onChange, onLinkActivate, title, onRenameTitle }, "live");
     registeredHandle = {
       getContent: () => engine?.getContent() ?? "",
       getPlainText: () => engine?.getPlainText() ?? "",

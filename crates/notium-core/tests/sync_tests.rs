@@ -20,15 +20,15 @@ fn sample_notes() -> Vec<NoteSpec> {
     vec![
         NoteSpec {
             note_id: "note_md_1".into(),
-            format: "markdown".into(),
-            path: "notes/markdown/Doc.md".into(),
-            initial: b"# Doc\n\nline one\nline two\nline three\n".to_vec(),
+            format: "tiptap".into(),
+            path: "notes/tiptap/Doc.json".into(),
+            initial: note("# Doc\n\nline one\nline two\nline three\n").into_bytes(),
         },
         NoteSpec {
             note_id: "note_md_2".into(),
-            format: "markdown".into(),
-            path: "notes/markdown/Proyecto.md".into(),
-            initial: b"# Proyecto\n\nhola\n".to_vec(),
+            format: "tiptap".into(),
+            path: "notes/tiptap/Proyecto.json".into(),
+            initial: note("# Proyecto\n\nhola\n").into_bytes(),
         },
     ]
 }
@@ -36,7 +36,7 @@ fn sample_notes() -> Vec<NoteSpec> {
 #[test]
 fn s1_fast_forward() {
     let (_d, vault, mut db) = device();
-    vault.write_atomic("notes/markdown/A.md", b"v1").unwrap();
+    vault.write_atomic("notes/tiptap/A.json", b"v1").unwrap();
     db.set_current("note_a", 0, Some(b"v1")).unwrap();
 
     let op = local_update_op(
@@ -47,57 +47,62 @@ fn s1_fast_forward() {
         Hlc::origin().tick(1),
         1,
     );
-    let out = apply_remote(&mut db, &vault, &op, "markdown", "notes/markdown/A.md").unwrap();
+    let out = apply_remote(&mut db, &vault, &op, "tiptap", "notes/tiptap/A.json").unwrap();
     assert_eq!(out, ApplyOutcome::FastForward);
-    assert_eq!(vault.read("notes/markdown/A.md").unwrap(), b"v2");
+    assert_eq!(vault.read("notes/tiptap/A.json").unwrap(), b"v2");
     assert_eq!(db.get_current("note_a").unwrap().unwrap().0, 1);
 }
 
+/// A note file whose paragraphs are `text`'s lines.
+fn note(text: &str) -> String {
+    notium_core::envelope::note_from_text(text)
+}
+
 #[test]
-fn s2_md_disjoint_merge() {
+fn s2_disjoint_edits_merge() {
     let (_d, vault, mut db) = device();
-    let base = "line1\nline2\nline3\n";
+    let base = note("line1\nline2\nline3\n");
     vault
-        .write_atomic("notes/markdown/A.md", base.as_bytes())
+        .write_atomic("notes/tiptap/A.json", base.as_bytes())
         .unwrap();
     db.set_current("note_a", 0, Some(base.as_bytes())).unwrap();
 
     // local edit (rev 1)
-    let mine = "MINE\nline2\nline3\n";
+    let mine = note("MINE\nline2\nline3\n");
     vault
-        .write_atomic("notes/markdown/A.md", mine.as_bytes())
+        .write_atomic("notes/tiptap/A.json", mine.as_bytes())
         .unwrap();
     db.set_current("note_a", 1, Some(mine.as_bytes())).unwrap();
 
-    // remote op based on rev 0, editing a disjoint line
+    // remote op based on rev 0, editing a disjoint paragraph
     let op = local_update_op(
         "devB",
         "note_a",
         0,
-        "line1\nline2\nTHEIRS\n".as_bytes().to_vec(),
+        note("line1\nline2\nTHEIRS\n").into_bytes(),
         Hlc::origin().tick(1),
         1,
     );
-    let out = apply_remote(&mut db, &vault, &op, "markdown", "notes/markdown/A.md").unwrap();
+    let out = apply_remote(&mut db, &vault, &op, "tiptap", "notes/tiptap/A.json").unwrap();
     assert_eq!(out, ApplyOutcome::Merged { conflict: false });
     assert_eq!(
-        String::from_utf8(vault.read("notes/markdown/A.md").unwrap()).unwrap(),
-        "MINE\nline2\nTHEIRS\n"
+        String::from_utf8(vault.read("notes/tiptap/A.json").unwrap()).unwrap(),
+        note("MINE\nline2\nTHEIRS\n")
     );
 }
 
 #[test]
-fn s3_md_conflict_markers_and_copy() {
+fn s3_conflict_keeps_mine_and_copies_theirs() {
     let (_d, vault, mut db) = device();
-    let base = "line1\nline2\n";
+    let base = note("line1\nline2\n");
     vault
-        .write_atomic("notes/markdown/A.md", base.as_bytes())
+        .write_atomic("notes/tiptap/A.json", base.as_bytes())
         .unwrap();
     db.set_current("note_a", 0, Some(base.as_bytes())).unwrap();
 
-    let mine = "mine edit\nline2\n";
+    let mine = note("mine edit\nline2\n");
     vault
-        .write_atomic("notes/markdown/A.md", mine.as_bytes())
+        .write_atomic("notes/tiptap/A.json", mine.as_bytes())
         .unwrap();
     db.set_current("note_a", 1, Some(mine.as_bytes())).unwrap();
 
@@ -105,72 +110,78 @@ fn s3_md_conflict_markers_and_copy() {
         "devB",
         "note_a",
         0,
-        "theirs edit\nline2\n".as_bytes().to_vec(),
+        note("theirs edit\nline2\n").into_bytes(),
         Hlc::origin().tick(1),
         1,
     );
     let (out, copy) =
-        sync::apply_remote_ex(&mut db, &vault, &op, "markdown", "notes/markdown/A.md").unwrap();
+        sync::apply_remote_ex(&mut db, &vault, &op, "tiptap", "notes/tiptap/A.json").unwrap();
     assert_eq!(out, ApplyOutcome::Merged { conflict: true });
 
     // The local edit (never journaled: a fresh edit on disk) stays in the note,
     // untouched and without markers; the remote one goes to a copy with its own id.
-    let content = String::from_utf8(vault.read("notes/markdown/A.md").unwrap()).unwrap();
+    let content = String::from_utf8(vault.read("notes/tiptap/A.json").unwrap()).unwrap();
     assert_eq!(content, mine);
 
     let copy = copy.expect("conflict copy");
     assert_eq!(
         copy.path,
-        merge::conflict_copy_path("notes/markdown/A.md", "devB", 1)
+        merge::conflict_copy_path("notes/tiptap/A.json", "devB", 1)
     );
     let text = String::from_utf8(vault.read(&copy.path).unwrap()).unwrap();
-    assert!(text.contains("theirs edit\nline2\n"));
-    assert!(text.contains(&format!("notium_id: {}", copy.note_id)));
+    assert!(text.contains("theirs edit"));
+    assert!(notium_core::envelope::is_note(&text));
+    assert_eq!(
+        notium_core::envelope::notium_id(&text).as_deref(),
+        Some(copy.note_id.as_str())
+    );
     assert_ne!(copy.note_id, "note_a");
 }
 
 #[test]
 fn s3b_newer_remote_version_wins_a_conflict() {
     let (_d, vault, mut db) = device();
-    let base = "line1\nline2\n";
+    let base = note("line1\nline2\n");
     vault
-        .write_atomic("notes/markdown/A.md", base.as_bytes())
+        .write_atomic("notes/tiptap/A.json", base.as_bytes())
         .unwrap();
     db.set_current("note_a", 0, Some(base.as_bytes())).unwrap();
     // A journaled local edit stamped at t=5.
+    let mine_text = note("mine edit\nline2\n");
     let mine = local_update_op(
         "devA",
         "note_a",
         0,
-        b"mine edit\nline2\n".to_vec(),
+        mine_text.clone().into_bytes(),
         Hlc { ts: 5, cnt: 0 },
         5,
     );
     db.append_journal(&mine).unwrap();
     vault
-        .write_atomic("notes/markdown/A.md", b"mine edit\nline2\n")
+        .write_atomic("notes/tiptap/A.json", mine_text.as_bytes())
         .unwrap();
-    db.set_current("note_a", 1, Some(b"mine edit\nline2\n"))
+    db.set_current("note_a", 1, Some(mine_text.as_bytes()))
         .unwrap();
 
+    let theirs_text = note("theirs edit\nline2\n");
     let theirs = local_update_op(
         "devB",
         "note_a",
         0,
-        b"theirs edit\nline2\n".to_vec(),
+        theirs_text.clone().into_bytes(),
         Hlc { ts: 9, cnt: 0 },
         9,
     );
     let (_, copy) =
-        sync::apply_remote_ex(&mut db, &vault, &theirs, "markdown", "notes/markdown/A.md").unwrap();
+        sync::apply_remote_ex(&mut db, &vault, &theirs, "tiptap", "notes/tiptap/A.json").unwrap();
     assert_eq!(
-        vault.read("notes/markdown/A.md").unwrap(),
-        b"theirs edit\nline2\n"
+        vault.read("notes/tiptap/A.json").unwrap(),
+        theirs_text.as_bytes()
     );
     let copy = copy.unwrap();
     assert_eq!(
         copy.path,
-        merge::conflict_copy_path("notes/markdown/A.md", "devA", 5)
+        merge::conflict_copy_path("notes/tiptap/A.json", "devA", 5)
     );
     assert!(String::from_utf8(copy.content)
         .unwrap()
@@ -183,7 +194,13 @@ fn s6_rename_with_concurrent_edit_keeps_identity() {
     let vault = LocalVault::new(dir.path());
     vault.init().unwrap();
     vault
-        .write_atomic("notes/markdown/Idea.md", b"# Idea\n\ncontent v1\n")
+        .write_atomic(
+            "notes/tiptap/Idea.json",
+            notium_core::envelope::note_from_text(&String::from_utf8_lossy(
+                b"# Idea\n\ncontent v1\n".as_ref(),
+            ))
+            .as_bytes(),
+        )
         .unwrap();
     let mut index = Index::open(&vault.index_db_path()).unwrap();
     index.reconcile(&vault).unwrap();
@@ -191,8 +208,8 @@ fn s6_rename_with_concurrent_edit_keeps_identity() {
 
     // external rename (preserves the embedded id in the file)
     std::fs::rename(
-        vault.root.join("notes/markdown/Idea.md"),
-        vault.root.join("notes/markdown/Viaje.md"),
+        vault.root.join("notes/tiptap/Idea.json"),
+        vault.root.join("notes/tiptap/Viaje.json"),
     )
     .unwrap();
     index.reconcile(&vault).unwrap();
@@ -200,13 +217,19 @@ fn s6_rename_with_concurrent_edit_keeps_identity() {
     // concurrent content edit that preserves the embedded id (as the app would)
     let content = format!("---\nnotium_id: {id}\n---\n# Viaje\n\ncontent v2\n");
     vault
-        .write_atomic("notes/markdown/Viaje.md", content.as_bytes())
+        .write_atomic(
+            "notes/tiptap/Viaje.json",
+            notium_core::envelope::note_from_text(&String::from_utf8_lossy(
+                content.as_bytes().as_ref(),
+            ))
+            .as_bytes(),
+        )
         .unwrap();
     index.reconcile(&vault).unwrap();
 
     let rec = index.get_note(&id).unwrap().unwrap();
     assert_eq!(rec.note_id, id);
-    assert_eq!(rec.path, "notes/markdown/Viaje.md");
+    assert_eq!(rec.path, "notes/tiptap/Viaje.json");
     assert_eq!(rec.title, "Viaje");
     assert_eq!(
         index.resolve_link("Idea").unwrap().unwrap(),
@@ -221,27 +244,31 @@ fn s7_rename_vs_rename_accumulates_aliases() {
     let vault = LocalVault::new(dir.path());
     vault.init().unwrap();
     vault
-        .write_atomic("notes/markdown/Idea.md", b"# Idea\n")
+        .write_atomic(
+            "notes/tiptap/Idea.json",
+            notium_core::envelope::note_from_text(&String::from_utf8_lossy(b"# Idea\n".as_ref()))
+                .as_bytes(),
+        )
         .unwrap();
     let mut index = Index::open(&vault.index_db_path()).unwrap();
     index.reconcile(&vault).unwrap();
     let id = index.list_notes().unwrap()[0].note_id.clone();
 
     std::fs::rename(
-        vault.root.join("notes/markdown/Idea.md"),
-        vault.root.join("notes/markdown/Viaje.md"),
+        vault.root.join("notes/tiptap/Idea.json"),
+        vault.root.join("notes/tiptap/Viaje.json"),
     )
     .unwrap();
     index.reconcile(&vault).unwrap();
     std::fs::rename(
-        vault.root.join("notes/markdown/Viaje.md"),
-        vault.root.join("notes/markdown/Trabajo.md"),
+        vault.root.join("notes/tiptap/Viaje.json"),
+        vault.root.join("notes/tiptap/Trabajo.json"),
     )
     .unwrap();
     index.reconcile(&vault).unwrap();
 
     let rec = index.get_note(&id).unwrap().unwrap();
-    assert_eq!(rec.path, "notes/markdown/Trabajo.md");
+    assert_eq!(rec.path, "notes/tiptap/Trabajo.json");
     // every historical title still resolves
     assert_eq!(index.resolve_link("Idea").unwrap().unwrap(), id);
     assert_eq!(index.resolve_link("Viaje").unwrap().unwrap(), id);
@@ -250,11 +277,11 @@ fn s7_rename_vs_rename_accumulates_aliases() {
 #[test]
 fn s8_delete_vs_update_keeps_file() {
     let (_d, vault, mut db) = device();
-    vault.write_atomic("notes/markdown/A.md", b"v1").unwrap();
+    vault.write_atomic("notes/tiptap/A.json", b"v1").unwrap();
     db.set_current("note_a", 0, Some(b"v1")).unwrap();
     // local edit -> rev 1
     vault
-        .write_atomic("notes/markdown/A.md", b"local edit")
+        .write_atomic("notes/tiptap/A.json", b"local edit")
         .unwrap();
     db.set_current("note_a", 1, Some(b"local edit")).unwrap();
 
@@ -273,10 +300,10 @@ fn s8_delete_vs_update_keeps_file() {
         purge: false,
         base_hash: None,
     };
-    let out = apply_remote(&mut db, &vault, &op, "markdown", "notes/markdown/A.md").unwrap();
+    let out = apply_remote(&mut db, &vault, &op, "tiptap", "notes/tiptap/A.json").unwrap();
     assert_eq!(out, ApplyOutcome::DeleteConflict);
     assert!(
-        vault.exists("notes/markdown/A.md"),
+        vault.exists("notes/tiptap/A.json"),
         "file must be kept for user resolution"
     );
 }
@@ -284,7 +311,7 @@ fn s8_delete_vs_update_keeps_file() {
 #[test]
 fn s9_no_resurrection_from_stale_push() {
     let (_d, vault, mut db) = device();
-    vault.write_atomic("notes/markdown/A.md", b"v1").unwrap();
+    vault.write_atomic("notes/tiptap/A.json", b"v1").unwrap();
     db.set_current("note_a", 0, Some(b"v1")).unwrap();
 
     // delete at rev 1
@@ -303,10 +330,10 @@ fn s9_no_resurrection_from_stale_push() {
         base_hash: None,
     };
     assert_eq!(
-        apply_remote(&mut db, &vault, &del, "markdown", "notes/markdown/A.md").unwrap(),
+        apply_remote(&mut db, &vault, &del, "tiptap", "notes/tiptap/A.json").unwrap(),
         ApplyOutcome::Deleted
     );
-    assert!(!vault.exists("notes/markdown/A.md"));
+    assert!(!vault.exists("notes/tiptap/A.json"));
 
     // stale update from a device that was offline before the delete
     let stale = local_update_op(
@@ -317,10 +344,10 @@ fn s9_no_resurrection_from_stale_push() {
         Hlc::origin().tick(2),
         2,
     );
-    let out = apply_remote(&mut db, &vault, &stale, "markdown", "notes/markdown/A.md").unwrap();
+    let out = apply_remote(&mut db, &vault, &stale, "tiptap", "notes/tiptap/A.json").unwrap();
     assert_eq!(out, ApplyOutcome::RejectedTombstone);
     assert!(
-        !vault.exists("notes/markdown/A.md"),
+        !vault.exists("notes/tiptap/A.json"),
         "file must not be resurrected"
     );
 }
@@ -328,17 +355,27 @@ fn s9_no_resurrection_from_stale_push() {
 #[test]
 fn s10_external_edit_not_overwritten() {
     let (_d, vault, mut db) = device();
-    vault.write_atomic("notes/markdown/A.md", b"v1").unwrap();
+    vault.write_atomic("notes/tiptap/A.json", b"v1").unwrap();
     db.set_current("note_a", 0, Some(b"v1")).unwrap();
     // local edit -> rev 1, sync.db knows "local v1"
     vault
-        .write_atomic("notes/markdown/A.md", b"local v1")
+        .write_atomic(
+            "notes/tiptap/A.json",
+            notium_core::envelope::note_from_text(&String::from_utf8_lossy(b"local v1".as_ref()))
+                .as_bytes(),
+        )
         .unwrap();
     db.set_current("note_a", 1, Some(b"local v1")).unwrap();
 
     // external disk edit (not recorded in sync.db)
     vault
-        .write_atomic("notes/markdown/A.md", b"external edit")
+        .write_atomic(
+            "notes/tiptap/A.json",
+            notium_core::envelope::note_from_text(&String::from_utf8_lossy(
+                b"external edit".as_ref(),
+            ))
+            .as_bytes(),
+        )
         .unwrap();
 
     // remote op that would fast-forward if we ignored the external edit
@@ -350,13 +387,13 @@ fn s10_external_edit_not_overwritten() {
         Hlc::origin().tick(1),
         1,
     );
-    let out = apply_remote(&mut db, &vault, &op, "markdown", "notes/markdown/A.md").unwrap();
+    let out = apply_remote(&mut db, &vault, &op, "tiptap", "notes/tiptap/A.json").unwrap();
     assert_ne!(
         out,
         ApplyOutcome::FastForward,
         "must not silently overwrite external edit"
     );
-    let content = String::from_utf8(vault.read("notes/markdown/A.md").unwrap()).unwrap();
+    let content = String::from_utf8(vault.read("notes/tiptap/A.json").unwrap()).unwrap();
     assert!(
         content.contains("external"),
         "external edit must be preserved: {content}"

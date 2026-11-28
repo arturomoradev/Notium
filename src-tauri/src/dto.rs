@@ -71,7 +71,7 @@ mod tests {
 
     #[test]
     fn backup_entry_accepts_legacy_number_array() {
-        let legacy = r#"{"rel_path":"notes/markdown/A.md","bytes":[35,32,65]}"#;
+        let legacy = r#"{"rel_path":"notes/tiptap/A.json","bytes":[35,32,65]}"#;
         let entry: VaultBackupEntryDto = serde_json::from_str(legacy).unwrap();
         assert_eq!(entry.bytes, b"# A");
     }

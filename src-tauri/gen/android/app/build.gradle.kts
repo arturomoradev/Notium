@@ -27,10 +27,10 @@ val keystoreProperties = Properties().apply {
 
 android {
     compileSdk = 37
-    namespace = "dev.notium.app"
+    namespace = "dev.notium.html"
     defaultConfig {
         manifestPlaceholders["usesCleartextTraffic"] = "false"
-        applicationId = "dev.notium.app"
+        applicationId = "dev.notium.html"
         minSdk = 24
         targetSdk = 37
         versionCode = tauriProperties.getProperty("tauri.android.versionCode", "1").toInt()

@@ -69,14 +69,14 @@ pub fn sanitize_folder_path(folder: &str) -> io::Result<String> {
     Ok(parts.join("/"))
 }
 
-/// Whether `path` is a vault-relative Markdown note path a remote op may write:
-/// under `notes/markdown/`, ending in `.md`, with no traversal, backslashes,
+/// Whether `path` is a vault-relative note path a remote op may write:
+/// under `notes/tiptap/`, ending in `.json`, with no traversal, backslashes,
 /// empty segments or reserved characters in any segment.
 pub fn is_safe_note_rel_path(path: &str) -> bool {
-    let Some(rest) = path.strip_prefix("notes/markdown/") else {
+    let Some(rest) = path.strip_prefix("notes/tiptap/") else {
         return false;
     };
-    if !rest.ends_with(".md") || path.contains('\\') {
+    if !rest.ends_with(".json") || path.contains('\\') {
         return false;
     }
     rest.split('/')
@@ -89,14 +89,14 @@ mod tests {
 
     #[test]
     fn safe_note_paths() {
-        assert!(is_safe_note_rel_path("notes/markdown/Idea.md"));
-        assert!(is_safe_note_rel_path("notes/markdown/Proyectos/Plan 2.md"));
-        assert!(!is_safe_note_rel_path("notes/markdown/../x.md"));
-        assert!(!is_safe_note_rel_path("notes/markdown//x.md"));
-        assert!(!is_safe_note_rel_path("attachments/x.md"));
-        assert!(!is_safe_note_rel_path("notes/markdown/x.txt"));
-        assert!(!is_safe_note_rel_path("notes/markdown/a:b.md"));
-        assert!(!is_safe_note_rel_path("notes/markdown/a\\b.md"));
+        assert!(is_safe_note_rel_path("notes/tiptap/Idea.json"));
+        assert!(is_safe_note_rel_path("notes/tiptap/Proyectos/Plan 2.json"));
+        assert!(!is_safe_note_rel_path("notes/tiptap/../x.json"));
+        assert!(!is_safe_note_rel_path("notes/tiptap//x.json"));
+        assert!(!is_safe_note_rel_path("attachments/x.json"));
+        assert!(!is_safe_note_rel_path("notes/tiptap/x.txt"));
+        assert!(!is_safe_note_rel_path("notes/tiptap/a:b.json"));
+        assert!(!is_safe_note_rel_path("notes/tiptap/a\\b.json"));
     }
 
     #[cfg(feature = "native")]
@@ -108,12 +108,12 @@ mod tests {
             sanitize_folder_path(&format!("{nfd}/x")).unwrap(),
             "Caf\u{e9}/x"
         );
-        assert!(!is_safe_note_rel_path(&format!("notes/markdown/{nfd}.md")));
+        assert!(!is_safe_note_rel_path(&format!("notes/tiptap/{nfd}.json")));
     }
 
     #[test]
     fn title_and_sanitize() {
-        assert_eq!(title_from_path("notes/markdown/Dir/Mi nota.md"), "Mi nota");
+        assert_eq!(title_from_path("notes/tiptap/Dir/Mi nota.json"), "Mi nota");
         assert_eq!(sanitize_folder_path(" a//b\\c ").unwrap(), "a/b/c");
         assert!(sanitize_folder_path("a/../b").is_err());
     }

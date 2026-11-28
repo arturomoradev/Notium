@@ -5,7 +5,7 @@
 //! results cross the boundary as JSON strings to keep the bindings dependency-free.
 
 use notium_core::extract::{self, EditorKind, OutLink};
-use notium_core::{frontmatter, hash, links, paths, sync::merge};
+use notium_core::{envelope, hash, links, paths, sync::merge};
 use serde::Serialize;
 use wasm_bindgen::prelude::*;
 
@@ -19,10 +19,10 @@ struct Extracted<'a> {
     attachment_refs: &'a [String],
 }
 
-/// Extract a Markdown note: JSON `{ title, tags, plain_text, out_links, attachment_refs }`.
+/// Extract a note file: JSON `{ title, tags, plain_text, out_links, attachment_refs }`.
 #[wasm_bindgen]
-pub fn extract_markdown(note_id: &str, text: &str) -> Result<String, JsError> {
-    let doc = extract::extract(EditorKind::Markdown, note_id, text.as_bytes())
+pub fn extract_note(note_id: &str, text: &str) -> Result<String, JsError> {
+    let doc = extract::extract(EditorKind::Tiptap, note_id, text.as_bytes())
         .map_err(|e| JsError::new(&e.to_string()))?;
     Ok(serde_json::to_string(&Extracted {
         title: &doc.title,
@@ -39,22 +39,32 @@ pub fn content_hash(bytes: &[u8]) -> String {
     hash::content_hash(bytes)
 }
 
-/// JSON `[prefix, body]`: the frontmatter block with its delimiters, and the body.
+/// The Tiptap doc of a note file, as JSON (an empty doc when there is none).
 #[wasm_bindgen]
-pub fn split_doc(text: &str) -> Result<String, JsError> {
-    let body = frontmatter::split(text).1;
-    let prefix = &text[..text.len() - body.len()];
-    Ok(serde_json::to_string(&(prefix, body))?)
+pub fn doc_json(text: &str) -> String {
+    envelope::doc_json(text)
+}
+
+/// The note file `previous` with its doc replaced by `doc` (Tiptap JSON).
+#[wasm_bindgen]
+pub fn with_doc(previous: &str, doc: &str) -> Result<String, JsError> {
+    envelope::with_doc(previous, doc).map_err(|e| JsError::new(&e))
+}
+
+/// A new, empty note file.
+#[wasm_bindgen]
+pub fn new_note(id: &str, created: &str) -> String {
+    envelope::new_note(id, created, envelope::empty_doc())
 }
 
 #[wasm_bindgen]
 pub fn inject_notium_id(text: &str, id: &str) -> String {
-    frontmatter::inject_notium_id(text, id)
+    envelope::inject_notium_id(text, id)
 }
 
 #[wasm_bindgen]
 pub fn upsert_field(text: &str, key: &str, val: &str) -> String {
-    frontmatter::upsert_field(text, key, val)
+    envelope::upsert_field(text, key, val)
 }
 
 #[wasm_bindgen]
@@ -62,7 +72,7 @@ pub fn sanitize_title(title: &str) -> String {
     paths::sanitize_title(title)
 }
 
-/// Clean a folder path relative to `notes/markdown`; rejects `.`/`..` segments.
+/// Clean a folder path relative to `notes/tiptap`; rejects `.`/`..` segments.
 #[wasm_bindgen]
 pub fn sanitize_folder_path(folder: &str) -> Result<String, JsError> {
     paths::sanitize_folder_path(folder).map_err(|e| JsError::new(&e.to_string()))
@@ -85,12 +95,12 @@ pub fn normalize_title(s: &str) -> String {
 
 /// JSON `[content, count]`.
 #[wasm_bindgen]
-pub fn rewrite_wikilink_targets(
+pub fn rewrite_note_links(
     content: &str,
     old_title: &str,
     new_title: &str,
 ) -> Result<String, JsError> {
-    Ok(serde_json::to_string(&links::rewrite_wikilink_targets(
+    Ok(serde_json::to_string(&links::rewrite_note_links(
         content, old_title, new_title,
     ))?)
 }

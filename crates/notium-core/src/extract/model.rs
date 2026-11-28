@@ -1,4 +1,4 @@
-//! Unified extraction model for Markdown notes.
+//! Unified extraction model for notes.
 
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -9,13 +9,13 @@ use thiserror::Error;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum EditorKind {
-    Markdown,
+    Tiptap,
 }
 
 impl EditorKind {
     pub fn as_str(&self) -> &'static str {
         match self {
-            EditorKind::Markdown => "markdown",
+            EditorKind::Tiptap => "tiptap",
         }
     }
 }
@@ -30,7 +30,7 @@ impl FromStr for EditorKind {
     type Err = String;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
-            "markdown" | "md" => Ok(EditorKind::Markdown),
+            "tiptap" | "json" => Ok(EditorKind::Tiptap),
             other => Err(format!("unknown editor kind: {other}")),
         }
     }

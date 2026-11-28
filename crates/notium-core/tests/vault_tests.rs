@@ -12,22 +12,30 @@ fn setup() -> (tempfile::TempDir, LocalVault) {
 }
 
 #[test]
-fn v1_adopt_md_preserves_bytes() {
+fn v1_adopt_preserves_other_fields() {
     let (_d, vault) = setup();
-    let orig = b"---\ntitle: Idea\n# a comment\nsome_key: keep me\n---\nbody text\n";
-    vault.write_atomic("notes/markdown/Idea.md", orig).unwrap();
+    let orig = notium_core::envelope::note_from_text(
+        "---\ntitle: Idea\nsome_key: keep me\n---\nbody text\n",
+    );
+    vault
+        .write_atomic("notes/tiptap/Idea.json", orig.as_bytes())
+        .unwrap();
     let mut index = Index::open(&vault.index_db_path()).unwrap();
     let report = index.reconcile(&vault).unwrap();
     assert_eq!(report.adopted, 1);
 
-    let after = vault.read("notes/markdown/Idea.md").unwrap();
+    let after = vault.read("notes/tiptap/Idea.json").unwrap();
     let s = String::from_utf8(after.clone()).unwrap();
-    assert!(s.contains("notium_id: note_"));
-    assert!(s.contains("# a comment"));
-    assert!(s.contains("some_key: keep me"));
-    assert!(s.ends_with("body text\n"));
-    // only the id line was added: original content minus the added line is intact
-    let id = extract_embedded_id(&after, EditorKind::Markdown).unwrap();
+    assert_eq!(
+        notium_core::envelope::field(&s, "some_key").as_deref(),
+        Some("keep me")
+    );
+    assert_eq!(
+        notium_core::envelope::field(&s, "title").as_deref(),
+        Some("Idea")
+    );
+    assert!(notium_core::envelope::doc_json(&s).contains("body text"));
+    let id = extract_embedded_id(&after, EditorKind::Tiptap).unwrap();
     assert!(id.starts_with("note_"));
 }
 
@@ -35,16 +43,28 @@ fn v1_adopt_md_preserves_bytes() {
 fn v3_external_rename_keeps_id_and_links() {
     let (_d, vault) = setup();
     vault
-        .write_atomic("notes/markdown/A.md", b"# A\n\nSee [[B]].\n")
+        .write_atomic(
+            "notes/tiptap/A.json",
+            notium_core::envelope::note_from_text(&String::from_utf8_lossy(
+                b"# A\n\nSee [[B]].\n".as_ref(),
+            ))
+            .as_bytes(),
+        )
         .unwrap();
-    vault.write_atomic("notes/markdown/B.md", b"# B\n").unwrap();
+    vault
+        .write_atomic(
+            "notes/tiptap/B.json",
+            notium_core::envelope::note_from_text(&String::from_utf8_lossy(b"# B\n".as_ref()))
+                .as_bytes(),
+        )
+        .unwrap();
     let mut index = Index::open(&vault.index_db_path()).unwrap();
     index.reconcile(&vault).unwrap();
     let b_id = index.resolve_link("B").unwrap().expect("resolve B");
 
     std::fs::rename(
-        vault.root.join("notes/markdown/B.md"),
-        vault.root.join("notes/markdown/C.md"),
+        vault.root.join("notes/tiptap/B.json"),
+        vault.root.join("notes/tiptap/C.json"),
     )
     .unwrap();
 
@@ -65,7 +85,13 @@ fn v3_external_rename_keeps_id_and_links() {
 fn v4_external_edit_reindexes_same_id() {
     let (_d, vault) = setup();
     vault
-        .write_atomic("notes/markdown/N.md", b"# N\n\noriginal\n")
+        .write_atomic(
+            "notes/tiptap/N.json",
+            notium_core::envelope::note_from_text(&String::from_utf8_lossy(
+                b"# N\n\noriginal\n".as_ref(),
+            ))
+            .as_bytes(),
+        )
         .unwrap();
     let mut index = Index::open(&vault.index_db_path()).unwrap();
     index.reconcile(&vault).unwrap();
@@ -74,7 +100,13 @@ fn v4_external_edit_reindexes_same_id() {
     let old_hash = rec[0].content_hash.clone();
 
     vault
-        .write_atomic("notes/markdown/N.md", b"# N\n\nedited externally\n")
+        .write_atomic(
+            "notes/tiptap/N.json",
+            notium_core::envelope::note_from_text(&String::from_utf8_lossy(
+                b"# N\n\nedited externally\n".as_ref(),
+            ))
+            .as_bytes(),
+        )
         .unwrap();
     index.reconcile(&vault).unwrap();
     let rec2 = index.get_note(&id).unwrap().unwrap();
@@ -85,12 +117,18 @@ fn v4_external_edit_reindexes_same_id() {
 #[test]
 fn v5_external_delete_tombstones() {
     let (_d, vault) = setup();
-    vault.write_atomic("notes/markdown/N.md", b"# N\n").unwrap();
+    vault
+        .write_atomic(
+            "notes/tiptap/N.json",
+            notium_core::envelope::note_from_text(&String::from_utf8_lossy(b"# N\n".as_ref()))
+                .as_bytes(),
+        )
+        .unwrap();
     let mut index = Index::open(&vault.index_db_path()).unwrap();
     index.reconcile(&vault).unwrap();
     let id = index.list_notes().unwrap()[0].note_id.clone();
 
-    std::fs::remove_file(vault.root.join("notes/markdown/N.md")).unwrap();
+    std::fs::remove_file(vault.root.join("notes/tiptap/N.json")).unwrap();
     let report = index.reconcile(&vault).unwrap();
     assert!(report.tombstones.contains(&id));
     assert!(index.get_note(&id).unwrap().unwrap().tombstoned);
@@ -104,20 +142,36 @@ fn v6_new_file_adopted() {
     assert!(index.list_notes().unwrap().is_empty());
 
     vault
-        .write_atomic("notes/markdown/New.md", b"# New\n")
+        .write_atomic(
+            "notes/tiptap/New.json",
+            notium_core::envelope::note_from_text(&String::from_utf8_lossy(b"# New\n".as_ref()))
+                .as_bytes(),
+        )
         .unwrap();
     let report = index.reconcile(&vault).unwrap();
     assert_eq!(report.new, 1);
     assert_eq!(index.list_notes().unwrap().len(), 1);
-    let bytes = vault.read("notes/markdown/New.md").unwrap();
-    assert!(String::from_utf8_lossy(&bytes).contains("notium_id:"));
+    let bytes = vault.read("notes/tiptap/New.json").unwrap();
+    assert!(notium_core::envelope::notium_id(&String::from_utf8_lossy(&bytes)).is_some());
 }
 
 #[test]
 fn v7_rebuild_after_index_delete_same_ids() {
     let (_d, vault) = setup();
-    vault.write_atomic("notes/markdown/A.md", b"# A\n").unwrap();
-    vault.write_atomic("notes/markdown/B.md", b"# B\n").unwrap();
+    vault
+        .write_atomic(
+            "notes/tiptap/A.json",
+            notium_core::envelope::note_from_text(&String::from_utf8_lossy(b"# A\n".as_ref()))
+                .as_bytes(),
+        )
+        .unwrap();
+    vault
+        .write_atomic(
+            "notes/tiptap/B.json",
+            notium_core::envelope::note_from_text(&String::from_utf8_lossy(b"# B\n".as_ref()))
+                .as_bytes(),
+        )
+        .unwrap();
     let mut index = Index::open(&vault.index_db_path()).unwrap();
     index.reconcile(&vault).unwrap();
     let before: Vec<String> = index
@@ -146,14 +200,20 @@ fn v8_id_collision_detected_and_kept() {
     let (_d, vault) = setup();
     vault
         .write_atomic(
-            "notes/markdown/A.md",
-            b"---\nnotium_id: note_DUP\n---\n# A\n",
+            "notes/tiptap/A.json",
+            notium_core::envelope::note_from_text(&String::from_utf8_lossy(
+                b"---\nnotium_id: note_DUP\n---\n# A\n".as_ref(),
+            ))
+            .as_bytes(),
         )
         .unwrap();
     vault
         .write_atomic(
-            "notes/markdown/B.md",
-            b"---\nnotium_id: note_DUP\n---\n# B\n",
+            "notes/tiptap/B.json",
+            notium_core::envelope::note_from_text(&String::from_utf8_lossy(
+                b"---\nnotium_id: note_DUP\n---\n# B\n".as_ref(),
+            ))
+            .as_bytes(),
         )
         .unwrap();
     let mut index = Index::open(&vault.index_db_path()).unwrap();

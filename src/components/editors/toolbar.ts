@@ -1,18 +1,8 @@
-// Formatting-toolbar contract for the Markdown editor (CodeMirror 6).
-import type { EditorView } from "@codemirror/view";
-import {
-  cursorCharLeft,
-  cursorCharRight,
-  cursorDocEnd,
-  cursorDocStart,
-  cursorLineDown,
-  cursorLineUp,
-  deleteLine,
-  moveLineDown,
-  moveLineUp,
-} from "@codemirror/commands";
+// Formatting-toolbar contract for the note editor (Tiptap).
+import type { Editor } from "@tiptap/core";
+import { TextSelection } from "@tiptap/pm/state";
 
-export type ViewCommand = (view: EditorView) => boolean | void;
+export type ViewCommand = (editor: Editor) => boolean | void;
 
 export interface FormattingEngine {
   undo(): void;
@@ -43,7 +33,7 @@ export interface FormattingEngine {
   wrap(marker: string): void;
   /** Replace the selection with `text`, caret `cursorOffset` chars into it. */
   insertText(text: string, cursorOffset: number): void;
-  /** Run a raw CodeMirror command on the view. */
+  /** Run a raw command on the Tiptap editor. */
   exec(cmd: ViewCommand): void;
   addMarkdownRow?(): void;
   addMarkdownColumn?(): void;
@@ -69,51 +59,93 @@ export interface ToolbarCommand {
   run?: (e: FormattingEngine) => void;
 }
 
-const clearFormatting: ViewCommand = (v) => {
-  const sel = v.state.selection.main;
-  const line = v.state.doc.lineAt(sel.head);
-  const [from, to] = sel.empty ? [line.from, line.to] : [sel.from, sel.to];
-  const text = v.state.sliceDoc(from, to).replace(/\*\*|~~|==|%%|\*|`|\$/g, "");
-  v.dispatch({ changes: { from, to, insert: text }, selection: { anchor: from + text.length } });
-};
+const clearFormatting: ViewCommand = (ed) => ed.chain().focus().unsetAllMarks().clearNodes().run();
 
-const footnote: ViewCommand = (v) => {
-  const doc = v.state.doc.toString();
+const footnote: ViewCommand = (ed) => {
+  const text = ed.getText();
   let n = 1;
-  while (doc.includes(`[^${n}]`)) n++;
+  while (text.includes(`[^${n}]`)) n++;
   const ref = `[^${n}]`;
-  const def = `${doc.endsWith("\n") ? "" : "\n"}\n${ref}: `;
-  v.dispatch({
-    changes: [
-      { from: v.state.selection.main.to, insert: ref },
-      { from: doc.length, insert: def },
-    ],
-    selection: { anchor: doc.length + ref.length + def.length },
-    scrollIntoView: true,
-  });
+  ed.chain().focus().insertContent(ref).run();
+  return ed
+    .chain()
+    .insertContentAt(ed.state.doc.content.size, {
+      type: "paragraph",
+      content: [{ type: "text", text: `${ref}: ` }],
+    })
+    .focus("end")
+    .run();
 };
 
-const selectedText = (v: EditorView) =>
-  v.state.sliceDoc(v.state.selection.main.from, v.state.selection.main.to);
+const selectedText = (ed: Editor) => {
+  const { from, to } = ed.state.selection;
+  return ed.state.doc.textBetween(from, to, "\n");
+};
 
-const copy: ViewCommand = (v) =>
-  void navigator.clipboard?.writeText(selectedText(v)).catch(() => {});
+const copy: ViewCommand = (ed) =>
+  void navigator.clipboard?.writeText(selectedText(ed)).catch(() => {});
 // Delete only once the text is safely on the clipboard.
-const cut: ViewCommand = (v) => {
-  const text = selectedText(v);
+const cut: ViewCommand = (ed) => {
+  const text = selectedText(ed);
   if (text)
     void navigator.clipboard
       ?.writeText(text)
-      .then(() => v.dispatch(v.state.replaceSelection("")))
+      .then(() => ed.chain().focus().deleteSelection().run())
       .catch(() => {});
 };
-const paste: ViewCommand = (v) =>
+const paste: ViewCommand = (ed) =>
   void navigator.clipboard
     ?.readText()
-    .then((t) => v.dispatch(v.state.replaceSelection(t), { scrollIntoView: true }))
+    .then((t) => ed.chain().focus().insertContent(t).run())
     .catch(() => {});
 
-const toggleKeyboard: ViewCommand = (v) => (v.hasFocus ? v.contentDOM.blur() : v.focus());
+const toggleKeyboard: ViewCommand = (ed) =>
+  ed.isFocused ? ed.commands.blur() : ed.commands.focus();
+
+// The browser moves the caret by visual line/char; ProseMirror follows the DOM selection.
+const moveCaret =
+  (dir: "forward" | "backward", unit: "line" | "character"): ViewCommand =>
+  (ed) => {
+    ed.commands.focus();
+    window.getSelection()?.modify("move", dir, unit);
+  };
+
+/** Swap the top-level block under the caret with its neighbour. */
+const moveBlock =
+  (delta: -1 | 1): ViewCommand =>
+  (ed) => {
+    const { $from } = ed.state.selection;
+    const doc = ed.state.doc;
+    const i = $from.index(0);
+    const j = i + delta;
+    if (j < 0 || j >= doc.childCount) return false;
+    const [a, b] = delta < 0 ? [j, i] : [i, j];
+    const start = $from.posAtIndex(a, 0);
+    const first = doc.child(a);
+    const second = doc.child(b);
+    const end = start + first.nodeSize + second.nodeSize;
+    // The caret keeps its offset inside the moved block.
+    const offset = $from.pos - $from.posAtIndex(i, 0);
+    const tr = ed.state.tr.replaceWith(start, end, [second, first]);
+    const blockStart = delta < 0 ? start : start + second.nodeSize;
+    ed.view.dispatch(tr.setSelection(TextSelection.near(tr.doc.resolve(blockStart + offset))));
+    ed.commands.focus();
+  };
+
+const deleteBlock: ViewCommand = (ed) =>
+  ed.chain().focus().selectParentNode().deleteSelection().run();
+
+/** A formula from the selected text, or asked for when nothing is selected. */
+const insertMath =
+  (block: boolean): ViewCommand =>
+  (ed) => {
+    const { from, to } = ed.state.selection;
+    const latex =
+      ed.state.doc.textBetween(from, to, " ").trim() || window.prompt("Fórmula LaTeX", "");
+    if (!latex?.trim()) return false;
+    const c = ed.chain().focus().deleteSelection();
+    return (block ? c.insertBlockMath({ latex }) : c.insertInlineMath({ latex })).run();
+  };
 
 const now = () => new Date();
 const insertNow = (e: FormattingEngine, s: string) => e.insertText(s, s.length);
@@ -153,7 +185,12 @@ export const TOOLBAR_COMMANDS: ToolbarCommand[] = [
     icon: "heading",
     run: (e: FormattingEngine) => e.setHeading(n),
   })),
-  { id: "math", title: "Matemáticas en línea", icon: "sigma", run: (e) => e.wrap("$") },
+  {
+    id: "math",
+    title: "Matemáticas en línea",
+    icon: "sigma",
+    run: (e) => e.exec(insertMath(false)),
+  },
   {
     id: "clear-format",
     title: "Limpiar formato",
@@ -164,7 +201,8 @@ export const TOOLBAR_COMMANDS: ToolbarCommand[] = [
     id: "callout",
     title: "Insertar callout",
     icon: "quote",
-    run: (e) => e.insertText("> [!note]\n> ", 12),
+    run: (e) =>
+      e.exec((ed) => ed.chain().focus().toggleBlockquote().insertContent("[!note] ").run()),
   },
   { id: "codeblock", title: "Bloque de código", icon: "code", run: (e) => e.codeBlock() },
   { id: "hr", title: "Línea horizontal", icon: "minus", run: (e) => e.horizontalRule() },
@@ -172,47 +210,57 @@ export const TOOLBAR_COMMANDS: ToolbarCommand[] = [
     id: "math-block",
     title: "Bloque de matemáticas",
     icon: "sigma",
-    run: (e) => e.insertText("$$\n\n$$", 3),
+    run: (e) => e.exec(insertMath(true)),
   },
   { id: "table", title: "Tabla 3×3", icon: "table", run: (e) => e.insertTable() },
   { id: "footnote", title: "Nota al pie", icon: "superscript", run: (e) => e.exec(footnote) },
-  { id: "line-up", title: "Mover línea arriba", icon: "arrow-up", run: (e) => e.exec(moveLineUp) },
+  {
+    id: "line-up",
+    title: "Mover línea arriba",
+    icon: "arrow-up",
+    run: (e) => e.exec(moveBlock(-1)),
+  },
   {
     id: "line-down",
     title: "Mover línea abajo",
     icon: "arrow-down",
-    run: (e) => e.exec(moveLineDown),
+    run: (e) => e.exec(moveBlock(1)),
   },
-  { id: "caret-up", title: "Cursor arriba", icon: "chevron-up", run: (e) => e.exec(cursorLineUp) },
+  {
+    id: "caret-up",
+    title: "Cursor arriba",
+    icon: "chevron-up",
+    run: (e) => e.exec(moveCaret("backward", "line")),
+  },
   {
     id: "caret-down",
     title: "Cursor abajo",
     icon: "chevron-down",
-    run: (e) => e.exec(cursorLineDown),
+    run: (e) => e.exec(moveCaret("forward", "line")),
   },
   {
     id: "caret-left",
     title: "Cursor a la izquierda",
     icon: "chevron-left",
-    run: (e) => e.exec(cursorCharLeft),
+    run: (e) => e.exec(moveCaret("backward", "character")),
   },
   {
     id: "caret-right",
     title: "Cursor a la derecha",
     icon: "chevron-right",
-    run: (e) => e.exec(cursorCharRight),
+    run: (e) => e.exec(moveCaret("forward", "character")),
   },
   {
     id: "doc-start",
     title: "Ir a la primera línea",
     icon: "chevrons-up",
-    run: (e) => e.exec(cursorDocStart),
+    run: (e) => e.exec((ed) => ed.commands.focus("start")),
   },
   {
     id: "doc-end",
     title: "Ir a la última línea",
     icon: "chevrons-down",
-    run: (e) => e.exec(cursorDocEnd),
+    run: (e) => e.exec((ed) => ed.commands.focus("end")),
   },
   {
     id: "keyboard",
@@ -220,7 +268,7 @@ export const TOOLBAR_COMMANDS: ToolbarCommand[] = [
     icon: "keyboard",
     run: (e) => e.exec(toggleKeyboard),
   },
-  { id: "delete-line", title: "Eliminar párrafo", icon: "trash", run: (e) => e.exec(deleteLine) },
+  { id: "delete-line", title: "Eliminar párrafo", icon: "trash", run: (e) => e.exec(deleteBlock) },
   {
     id: "table-add-row",
     title: "Tabla: añadir fila",

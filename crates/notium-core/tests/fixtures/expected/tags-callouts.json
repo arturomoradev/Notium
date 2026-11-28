@@ -1,13 +1,13 @@
 {
   "note_id": "note_tags-callouts",
   "title": "Tags",
-  "editor": "markdown",
+  "editor": "tiptap",
   "meta": {
     "created_at": null,
     "updated_at": null,
     "tags": []
   },
-  "plain_text": "Tags\n#idea #viaje some text with #inline tag.\n[!note] This is a callout With #callouttag inside.\n# not a tag in code\nprint(\"#code\")",
+  "plain_text": "Tags\n#idea #viaje some text with #inline tag.\n[!note] This is a callout\nWith #callouttag inside.\n# not a tag in code\nprint(\"#code\")",
   "tags": [
     "callouttag",
     "idea",
@@ -30,10 +30,10 @@
       "body": "#idea #viaje some text with #inline tag."
     },
     {
-      "chunk_id": "7c99819366e02834c7381b63f746556d",
+      "chunk_id": "73e365ab519b20bdd0b3325a3cd0f964",
       "kind": "quote",
       "heading_path": "Tags",
-      "body": "[!note] This is a callout With #callouttag inside."
+      "body": "[!note] This is a callout\nWith #callouttag inside."
     },
     {
       "chunk_id": "e6eadc49e0437b63b78096d284f556fc",

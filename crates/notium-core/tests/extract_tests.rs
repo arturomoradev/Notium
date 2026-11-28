@@ -17,18 +17,18 @@ fn fixture(sub: &str, name: &str) -> PathBuf {
 #[test]
 fn x1_golden_snapshots() {
     let expected_dir = fixtures_dir().join("expected");
-    let dir = fixtures_dir().join("md");
+    let dir = fixtures_dir().join("notes");
     let mut files: Vec<_> = std::fs::read_dir(&dir)
         .unwrap()
         .filter_map(|e| e.ok())
         .map(|e| e.path())
-        .filter(|p| p.extension().map(|e| e == "md").unwrap_or(false))
+        .filter(|p| p.extension().map(|e| e == "json").unwrap_or(false))
         .collect();
     files.sort();
     for path in files {
         let stem = path.file_stem().unwrap().to_string_lossy().to_string();
         let bytes = std::fs::read(&path).unwrap();
-        let doc = extract::extract(EditorKind::Markdown, &format!("note_{stem}"), &bytes).unwrap();
+        let doc = extract::extract(EditorKind::Tiptap, &format!("note_{stem}"), &bytes).unwrap();
         let actual = serde_json::to_value(&doc).unwrap();
         let expected: serde_json::Value = serde_json::from_str(
             &std::fs::read_to_string(expected_dir.join(format!("{stem}.json"))).unwrap(),
@@ -40,11 +40,11 @@ fn x1_golden_snapshots() {
 
 #[test]
 fn x2_chunk_ids_deterministic() {
-    let bytes = std::fs::read(fixture("md", "basic.md")).unwrap();
-    let a = extract::extract(EditorKind::Markdown, "note_x", &bytes).unwrap();
-    let b = extract::extract(EditorKind::Markdown, "note_x", &bytes).unwrap();
+    let bytes = std::fs::read(fixture("notes", "basic.json")).unwrap();
+    let a = extract::extract(EditorKind::Tiptap, "note_x", &bytes).unwrap();
+    let b = extract::extract(EditorKind::Tiptap, "note_x", &bytes).unwrap();
     assert_eq!(a.chunks, b.chunks);
-    let c = extract::extract(EditorKind::Markdown, "note_x", &bytes).unwrap();
+    let c = extract::extract(EditorKind::Tiptap, "note_x", &bytes).unwrap();
     assert_eq!(a.chunks, c.chunks);
 }
 
@@ -55,14 +55,20 @@ fn x3_bidirectional_backlinks() {
     vault.init().unwrap();
     vault
         .write_atomic(
-            "notes/markdown/A.md",
-            b"---\nnotium_id: note_a\n---\n# A\n\nSee [[Proyecto]].\n",
+            "notes/tiptap/A.json",
+            notium_core::envelope::note_from_text(&String::from_utf8_lossy(
+                b"---\nnotium_id: note_a\n---\n# A\n\nSee [[Proyecto]].\n".as_ref(),
+            ))
+            .as_bytes(),
         )
         .unwrap();
     vault
         .write_atomic(
-            "notes/markdown/Proyecto.md",
-            b"---\nnotium_id: note_proj\n---\n# Proyecto\n\nSee [[A]].\n",
+            "notes/tiptap/Proyecto.json",
+            notium_core::envelope::note_from_text(&String::from_utf8_lossy(
+                b"---\nnotium_id: note_proj\n---\n# Proyecto\n\nSee [[A]].\n".as_ref(),
+            ))
+            .as_bytes(),
         )
         .unwrap();
     let mut index = Index::open(&vault.index_db_path()).unwrap();
@@ -83,17 +89,27 @@ fn x4_rename_alias_resolves_old_link() {
     let vault = LocalVault::new(dir.path());
     vault.init().unwrap();
     vault
-        .write_atomic("notes/markdown/Link.md", b"# Link\n\n[[Idea]]\n")
+        .write_atomic(
+            "notes/tiptap/Link.json",
+            notium_core::envelope::note_from_text(&String::from_utf8_lossy(
+                b"# Link\n\n[[Idea]]\n".as_ref(),
+            ))
+            .as_bytes(),
+        )
         .unwrap();
     vault
-        .write_atomic("notes/markdown/Idea.md", b"# Idea\n")
+        .write_atomic(
+            "notes/tiptap/Idea.json",
+            notium_core::envelope::note_from_text(&String::from_utf8_lossy(b"# Idea\n".as_ref()))
+                .as_bytes(),
+        )
         .unwrap();
     let mut index = Index::open(&vault.index_db_path()).unwrap();
     index.reconcile(&vault).unwrap();
 
     std::fs::rename(
-        vault.root.join("notes/markdown/Idea.md"),
-        vault.root.join("notes/markdown/Concept.md"),
+        vault.root.join("notes/tiptap/Idea.json"),
+        vault.root.join("notes/tiptap/Concept.json"),
     )
     .unwrap();
     index.reconcile(&vault).unwrap();
@@ -112,7 +128,13 @@ fn x5_unresolved_links() {
     let vault = LocalVault::new(dir.path());
     vault.init().unwrap();
     vault
-        .write_atomic("notes/markdown/A.md", b"# A\n\n[[DoesNotExist]]\n")
+        .write_atomic(
+            "notes/tiptap/A.json",
+            notium_core::envelope::note_from_text(&String::from_utf8_lossy(
+                b"# A\n\n[[DoesNotExist]]\n".as_ref(),
+            ))
+            .as_bytes(),
+        )
         .unwrap();
     let mut index = Index::open(&vault.index_db_path()).unwrap();
     index.reconcile(&vault).unwrap();
@@ -131,7 +153,7 @@ fn x6_malformed_input_quarantined() {
     let vault = LocalVault::new(dir.path());
     vault.init().unwrap();
     vault
-        .write_atomic("notes/markdown/Bad.md", &[0xff, 0xfe, 0x00])
+        .write_atomic("notes/tiptap/Bad.json", &[0xff, 0xfe, 0x00])
         .unwrap();
     let mut index = Index::open(&vault.index_db_path()).unwrap();
     let report = index.reconcile(&vault).unwrap();
@@ -149,8 +171,9 @@ fn x7_big_note_extract_perf() {
             "Paragraph {i} with [[link{i}]] and #tag{i} text.\n\n"
         ));
     }
+    let s = notium_core::envelope::note_from_text(&s);
     let start = std::time::Instant::now();
-    let doc = extract::extract(EditorKind::Markdown, "note_big", s.as_bytes()).unwrap();
+    let doc = extract::extract(EditorKind::Tiptap, "note_big", s.as_bytes()).unwrap();
     let elapsed = start.elapsed();
     assert!(doc.chunks.len() > 1000);
     eprintln!(

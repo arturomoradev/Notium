@@ -11,13 +11,13 @@ fn main() {
     let notes = vec![
         NoteSpec {
             note_id: "note_md_1".into(),
-            format: "markdown".into(),
+            format: "tiptap".into(),
             path: "notes/markdown/Doc.md".into(),
             initial: b"# Doc\n\nline one\nline two\nline three\n".to_vec(),
         },
         NoteSpec {
             note_id: "note_md_2".into(),
-            format: "markdown".into(),
+            format: "tiptap".into(),
             path: "notes/markdown/Proyecto.md".into(),
             initial: b"# Proyecto\n\nhola\n".to_vec(),
         },

@@ -6,32 +6,12 @@
  */
 import { mockIPC } from "@tauri-apps/api/mocks";
 import type { NoteSummaryDto } from "../lib/ipc/types";
+import docs from "../lib/demoNotes.json";
 
-const GUIDE = `# Guía Visual y Ejemplos de Notium
-
-Esta nota sirve como **catálogo visual** de las funciones de *Live Preview*.
-
-Etiquetas de prueba: #guia #markdown #notium
-
-## Listas y tareas
-
-- Elemento con \`código\` y un [[Proyecto Alfa]]
-- [x] Tarea completada
-- [ ] Tarea pendiente
-
-> La simplicidad es la máxima sofisticación.
-
-> [!tip] Consejo
-> Los callouts usan el color de su tipo.
-
-| Columna | Valor |
-| --- | --- |
-| Ancho | 700px |
-
-\`\`\`python
-print("hello world")
-\`\`\`
-`;
+const heading = (text: string) => ({
+  type: "doc",
+  content: [{ type: "heading", attrs: { level: 1 }, content: [{ type: "text", text }] }],
+});
 
 const titles = [
   "Guía Visual y Ejemplos de Notium",
@@ -42,13 +22,13 @@ const titles = [
 const notes: NoteSummaryDto[] = titles.map((title, i) => ({
   note_id: `n${i}`,
   title,
-  format: "markdown",
-  path: i === 1 ? `Proyectos/${title}.md` : `${title}.md`,
+  format: "tiptap",
+  path: i === 1 ? `Proyectos/${title}.json` : `${title}.json`,
   updated_at: null,
   tags: i === 0 ? ["guia", "markdown", "notium"] : [],
 }));
 const contents = new Map(
-  notes.map((n) => [n.note_id, n.note_id === "n0" ? GUIDE : `# ${n.title}\n`]),
+  notes.map((n) => [n.note_id, JSON.stringify(n.note_id === "n0" ? docs.guide : heading(n.title))]),
 );
 
 const syncStatus = {

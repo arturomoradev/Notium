@@ -1,4 +1,3 @@
-import { StateEffect } from "@codemirror/state";
 import { call } from "../../../lib/ipc/commands";
 import { noteTitleSource } from "../../../lib/links/noteTitleSource";
 
@@ -8,16 +7,13 @@ export interface WikiCompletionEntry {
   keepOpenForSection?: boolean;
 }
 
-export const forceDecorationsEffect = StateEffect.define<null>();
-
-export const embedExcerptCache = new Map<string, { text: string; muted: boolean; ts: number }>();
 /** Object URLs per attachment path; storing the promise shares loads still in flight. */
 export const attachmentUrlCache = new Map<string, Promise<string>>();
-export const calloutCollapsedState = new Map<string, boolean>();
-export const EMBED_CACHE_TTL_MS = 15_000;
+const HEADING_CACHE_TTL_MS = 15_000;
 
+/** Drop cached headings of other notes (after a save, rename or sync). */
 export function invalidateEmbedCache(): void {
-  embedExcerptCache.clear();
+  headingCache = null;
 }
 
 export function imageMime(path: string): string {
@@ -37,49 +33,28 @@ export function normalizeHeading(s: string): string {
     .replace(/\s+/g, " ");
 }
 
-export function extractHeadingsFromMarkdown(content: string): { level: number; text: string }[] {
-  const out: { level: number; text: string }[] = [];
-  const lines = content.split(/\r?\n/);
-  let inFence = false;
-  for (const line of lines) {
-    if (/^\s*```/.test(line)) {
-      inFence = !inFence;
-      continue;
-    }
-    if (inFence) continue;
-    const m = /^(#{1,6})\s+(.+)$/.exec(line);
-    if (m) {
-      const cleaned = m[2].replace(/[*_`~=]+/g, "").trim();
-      if (cleaned) {
-        out.push({ level: m[1].length, text: cleaned });
-      }
-    }
-  }
-  return out;
+interface DocNode {
+  type?: string;
+  text?: string;
+  attrs?: { level?: number; target?: string };
+  content?: DocNode[];
 }
 
-export function extractHeadingSection(content: string, heading: string): string {
-  const target = normalizeHeading(heading);
-  if (!target) return content;
-  const lines = content.split(/\r?\n/);
-  let startIdx = -1;
-  let startLevel = 7;
-  for (let i = 0; i < lines.length; i++) {
-    const m = /^(#{1,6})\s+(.+)$/.exec(lines[i]);
-    if (m && normalizeHeading(m[2]) === target) {
-      startIdx = i;
-      startLevel = m[1].length;
-      break;
-    }
+const textOf = (n: DocNode): string =>
+  n.type === "text" ? (n.text ?? "") : (n.content ?? []).map(textOf).join("");
+
+/** Headings of a Tiptap doc (JSON string), in order. */
+export function headingsOf(docJson: string): { level: number; text: string }[] {
+  let doc: DocNode;
+  try {
+    doc = JSON.parse(docJson) as DocNode;
+  } catch {
+    return [];
   }
-  if (startIdx < 0) return content;
-  const section: string[] = [lines[startIdx]];
-  for (let i = startIdx + 1; i < lines.length; i++) {
-    const m = /^(#{1,6})\s+/.exec(lines[i]);
-    if (m && m[1].length <= startLevel) break;
-    section.push(lines[i]);
-  }
-  return section.join("\n");
+  return (doc.content ?? [])
+    .filter((n) => n.type === "heading")
+    .map((n) => ({ level: n.attrs?.level ?? 1, text: textOf(n).trim() }))
+    .filter((h) => h.text);
 }
 
 let headingCache: {
@@ -95,7 +70,7 @@ export async function buildWikiCompletionEntries(
   const hashIdx = query.indexOf("#");
   if (hashIdx === 0) {
     const filter = normalizeHeading(query.slice(1));
-    const headings = extractHeadingsFromMarkdown(currentDocText);
+    const headings = headingsOf(currentDocText);
     return headings
       .filter((h) => !filter || normalizeHeading(h.text).includes(filter))
       .slice(0, 15)
@@ -115,13 +90,13 @@ export async function buildWikiCompletionEntries(
     // One note_read per target note every 10 s, not one per keystroke after `#`.
     if (
       headingCache?.noteId !== exact.note_id ||
-      Date.now() - headingCache.ts > EMBED_CACHE_TTL_MS
+      Date.now() - headingCache.ts > HEADING_CACHE_TTL_MS
     ) {
       const full = await call("note_read", { noteId: exact.note_id });
       headingCache = {
         noteId: exact.note_id,
         ts: Date.now(),
-        headings: extractHeadingsFromMarkdown(full.content),
+        headings: headingsOf(full.content),
       };
     }
     const headings = headingCache.headings;
@@ -135,7 +110,7 @@ export async function buildWikiCompletionEntries(
   }
   const notes = await noteTitleSource(query);
   const entries: WikiCompletionEntry[] = [];
-  const currentHeadings = extractHeadingsFromMarkdown(currentDocText);
+  const currentHeadings = headingsOf(currentDocText);
   if (!query.trim() && currentHeadings.length > 0) {
     entries.push({
       label: "§ Enlazar sección de esta nota (#…)",

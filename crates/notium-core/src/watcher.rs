@@ -112,14 +112,18 @@ mod tests {
         .unwrap();
 
         // create a note (should be reported)
-        fs::create_dir_all(dir.path().join("notes/markdown")).unwrap();
-        fs::write(dir.path().join("notes/markdown/A.md"), b"# A\n").unwrap();
+        fs::create_dir_all(dir.path().join("notes/tiptap")).unwrap();
+        fs::write(
+            dir.path().join("notes/tiptap/A.json"),
+            crate::envelope::note_from_text(&String::from_utf8_lossy(b"# A\n".as_ref())).as_bytes(),
+        )
+        .unwrap();
         // create an .app file (should be filtered)
         fs::create_dir_all(dir.path().join(".app")).unwrap();
         fs::write(dir.path().join(".app/index.db"), b"x").unwrap();
 
         let paths = rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
-        assert!(paths.iter().any(|p| p == "notes/markdown/A.md"));
+        assert!(paths.iter().any(|p| p == "notes/tiptap/A.json"));
         assert!(!paths.iter().any(|p| p.starts_with(".app/")));
     }
 }

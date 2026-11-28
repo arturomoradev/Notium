@@ -9,7 +9,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
 use crate::clock::{self, Hlc};
-use crate::frontmatter;
+use crate::envelope;
 use crate::hash;
 use crate::vault::LocalVault;
 
@@ -763,7 +763,7 @@ pub struct ConflictCopy {
 
 /// Apply a remote op to a device using 3-way Markdown merge.
 ///
-/// `format` is `"markdown"`; `path` is the note's vault-relative path.
+/// `format` is `"tiptap"`; `path` is the note's vault-relative path.
 pub fn apply_remote(
     db: &mut SyncDb,
     vault: &LocalVault,
@@ -868,6 +868,9 @@ pub fn apply_remote_ex(
     let mut theirs_s = String::from_utf8_lossy(content).into_owned();
     align_updated(&mut mine_s, &mut theirs_s);
     let (merged, conflict) = merge::merge_md(&base, &mine_s, &theirs_s);
+    // shortcut: a line merge of two JSON notes can yield broken JSON; treat that as
+    // a conflict (winner + copy). A structural Tiptap merge is on the fork roadmap.
+    let conflict = conflict || !envelope::is_note(&merged);
     if !conflict {
         vault
             .write_atomic(path, merged.as_bytes())
@@ -896,14 +899,7 @@ pub fn apply_remote_ex(
     let seed = format!("{}/{loser_hash}", op.note_id);
     let copy_id = format!("note_{}", &hash::content_hash(seed.as_bytes())[..32]);
     let loser_text = String::from_utf8_lossy(loser);
-    let has_id = frontmatter::split(&loser_text)
-        .0
-        .is_some_and(|fm| frontmatter::notium_id(&fm).is_some());
-    let copy_text = if has_id {
-        frontmatter::upsert_field(&loser_text, "notium_id", &copy_id)
-    } else {
-        frontmatter::inject_notium_id(&loser_text, &copy_id)
-    };
+    let copy_text = envelope::upsert_field(&loser_text, "notium_id", &copy_id);
     let copy = ConflictCopy {
         note_id: copy_id,
         path: merge::conflict_copy_path(path, loser_device, loser_ts),
@@ -919,14 +915,10 @@ pub fn apply_remote_ex(
     Ok((ApplyOutcome::Merged { conflict: true }, Some(copy)))
 }
 
-/// Give both versions the later `updated:` frontmatter value, so the field
+/// Give both versions the later `updated` envelope value, so the field
 /// every save rewrites does not make each pair of concurrent edits conflict.
 fn align_updated(a: &mut String, b: &mut String) {
-    let updated = |t: &str| {
-        frontmatter::split(t)
-            .0
-            .and_then(|fm| frontmatter::field(&fm, "updated"))
-    };
+    let updated = |t: &str| envelope::field(t, "updated");
     let (Some(x), Some(y)) = (updated(a), updated(b)) else {
         return;
     };
@@ -938,8 +930,8 @@ fn align_updated(a: &mut String, b: &mut String) {
         (Ok(_), Ok(_)) => y,
         _ => x.max(y),
     };
-    *a = frontmatter::upsert_field(a, "updated", &later);
-    *b = frontmatter::upsert_field(b, "updated", &later);
+    *a = envelope::upsert_field(a, "updated", &later);
+    *b = envelope::upsert_field(b, "updated", &later);
 }
 
 fn rusqlite_err<E: std::fmt::Display>(e: E) -> rusqlite::Error {
@@ -980,16 +972,16 @@ mod path_tests {
     #[test]
     fn journal_keeps_path_for_push() {
         let mut db = SyncDb::open_in_memory().unwrap();
-        db.append_journal(&op_at(5, "pc", Some("notes/markdown/A.md")))
+        db.append_journal(&op_at(5, "pc", Some("notes/tiptap/A.json")))
             .unwrap();
         let ops = db.get_unpushed_ops().unwrap();
-        assert_eq!(ops[0].path.as_deref(), Some("notes/markdown/A.md"));
+        assert_eq!(ops[0].path.as_deref(), Some("notes/tiptap/A.json"));
     }
 
     #[test]
     fn latest_path_change_wins_regardless_of_arrival_order() {
-        let newer = op_at(20, "pc", Some("notes/markdown/B.md"));
-        let older = op_at(10, "phone", Some("notes/markdown/A.md"));
+        let newer = op_at(20, "pc", Some("notes/tiptap/B.json"));
+        let older = op_at(10, "phone", Some("notes/tiptap/A.json"));
         for order in [[&newer, &older], [&older, &newer]] {
             let mut db = SyncDb::open_in_memory().unwrap();
             let winners: Vec<_> = order
@@ -997,7 +989,7 @@ mod path_tests {
                 .filter(|op| db.claim_path(op).unwrap())
                 .map(|op| op.path.clone().unwrap())
                 .collect();
-            assert_eq!(winners.last().unwrap(), "notes/markdown/B.md");
+            assert_eq!(winners.last().unwrap(), "notes/tiptap/B.json");
         }
         let mut db = SyncDb::open_in_memory().unwrap();
         assert!(!db.claim_path(&op_at(30, "pc", None)).unwrap());
@@ -1141,7 +1133,7 @@ mod tests {
         assert!(is_safe_attachment_rel_path("attachments/photo.png"));
         assert!(is_safe_attachment_rel_path("attachments/sub/doc.pdf"));
         assert!(!is_safe_attachment_rel_path("attachments/"));
-        assert!(!is_safe_attachment_rel_path("notes/markdown/test.md"));
+        assert!(!is_safe_attachment_rel_path("notes/tiptap/test.json"));
         assert!(!is_safe_attachment_rel_path("attachments/../secret.txt"));
         assert!(!is_safe_attachment_rel_path("attachments\\photo.png"));
         assert!(!is_safe_attachment_rel_path("/attachments/photo.png"));

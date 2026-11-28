@@ -2,8 +2,8 @@
   import { onMount, tick } from "svelte";
   import { listen, TauriEvent, type UnlistenFn } from "@tauri-apps/api/event";
   import { call, importAttachment as importAttachmentFile } from "./lib/ipc/commands";
-  import MarkdownEditor from "./components/editors/MarkdownEditor.svelte";
-  import { invalidateEmbedCache } from "./components/editors/markdownEngine";
+  import NoteEditor from "./components/editors/NoteEditor.svelte";
+  import { invalidateEmbedCache } from "./components/editors/noteEngine";
   import Toolbar from "./components/editors/Toolbar.svelte";
   import ToolbarConfig from "./components/editors/ToolbarConfig.svelte";
   import Icon from "./components/editors/Icon.svelte";
@@ -16,7 +16,7 @@
   import TreeActionModal from "./components/navigation/TreeActionModal.svelte";
   import RightInspectorPanel from "./components/panels/RightInspectorPanel.svelte";
   import type { EditorHandle } from "./components/editors/engine";
-  import { countWords, statsOf, type Stats } from "./lib/plainText";
+  import { countWords, docOf, statsOf, type Stats } from "./lib/plainText";
   import { updateViewport } from "./lib/mobile/viewport";
   import { DEMO_GUIDE_TITLE, ensureDemoNotes } from "./lib/demoNotes";
   import { settingsStore } from "./lib/stores/settings.svelte";
@@ -64,7 +64,7 @@
   }
 
   let activeId = $state<string | null>(null);
-  let activeFormat = $state<EditorKind>("markdown");
+  let activeFormat = $state<EditorKind>("tiptap");
   let activeNoteContent = $state("");
   let activePath = $state("");
   let rev = $state(0);
@@ -128,7 +128,7 @@
   $effect(() => {
     if (!layout.compact || !(sidebarOpen || panelOpen || dragProgress !== null)) return;
     const focused = document.activeElement;
-    if (focused instanceof HTMLElement && focused.closest(".cm-editor")) focused.blur();
+    if (focused instanceof HTMLElement && focused.closest(".tt-content")) focused.blur();
   });
 
   // Android: tint the area behind the system bars like the surface under them.
@@ -327,12 +327,16 @@
           await save();
           const currentFolder = folderOf(activePath);
           const created = await call("note_create", {
-            kind: "markdown",
+            kind: "tiptap",
             title: notePart,
             folder: currentFolder || activeFolder || null,
           });
           if (headingPart) {
-            const withSection = `${created.content.trimEnd()}\n\n## ${headingPart}\n\n`;
+            const withSection = docOf({
+              type: "heading",
+              attrs: { level: 2 },
+              content: [{ type: "text", text: headingPart }],
+            });
             await call("note_save", {
               noteId: created.note.note_id,
               content: withSection,
@@ -536,7 +540,7 @@
     createMenuOpen = false;
     try {
       const note = await call("note_create", {
-        kind: "markdown",
+        kind: "tiptap",
         title: null,
         folder: folder ?? activeFolder ?? null,
       });
@@ -1013,7 +1017,7 @@
     {#if activeId}
       <div class="editor-body">
         {#key loadNonce}
-          <MarkdownEditor
+          <NoteEditor
             content={activeNoteContent}
             {viewMode}
             sourceMode={settings.source_mode}
@@ -1021,8 +1025,8 @@
             onLinkActivate={handleLink}
             title={activeTitle}
             onRenameTitle={renameActiveNote}
-            onReady={(handle) => registerEditor("markdown", handle)}
-            onEditorDestroy={(handle) => unregisterEditor("markdown", handle)}
+            onReady={(handle) => registerEditor("tiptap", handle)}
+            onEditorDestroy={(handle) => unregisterEditor("tiptap", handle)}
           />
         {/key}
       </div>
@@ -1067,9 +1071,25 @@
       <div class="create-fab">
         {#if createMenuOpen}
           <button class="create-fab-option" onclick={() => void createNote()}>
-            <Icon name="file" size={18} /> Nota .md
+            <Icon name="file" size={18} /> Nota
           </button>
-          <button class="create-fab-option" onclick={() => void createNote(undefined, "- [ ] ")}>
+          <button
+            class="create-fab-option"
+            onclick={() =>
+              void createNote(
+                undefined,
+                docOf({
+                  type: "taskList",
+                  content: [
+                    {
+                      type: "taskItem",
+                      attrs: { checked: false },
+                      content: [{ type: "paragraph" }],
+                    },
+                  ],
+                }),
+              )}
+          >
             <Icon name="checklist" size={18} /> Checklist
           </button>
         {/if}

@@ -3,7 +3,7 @@
   import Icon from "../editors/Icon.svelte";
   import { folderOf, formatError, type ConflictItem, type PanelTab } from "../../lib/vault/tree";
   import type { BacklinkDto, OutlinkDto } from "../../lib/ipc/types";
-  import type { Stats } from "../../lib/plainText";
+  import { linkFirstMention, type Stats } from "../../lib/plainText";
 
   interface Props {
     isDesktop: boolean;
@@ -128,12 +128,8 @@
     try {
       await onSaveBeforeAction();
       const source = await call("note_read", { noteId: sourceId });
-      const escaped = activeTitle.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-      const re = new RegExp(`(?<!\\[\\[)\\b(${escaped})\\b(?!\\]\\])`, "i");
-      const updated = re.test(source.content)
-        ? source.content.replace(re, `[[${activeTitle}]]`)
-        : source.content.replace(new RegExp(escaped, "i"), `[[${activeTitle}]]`);
-      if (updated !== source.content) {
+      const updated = linkFirstMention(source.content, activeTitle);
+      if (updated) {
         await call("note_save", {
           noteId: sourceId,
           content: updated,
@@ -177,7 +173,7 @@
       const folder = folderOf(c.path);
       const copyTitle = `${c.title} (Copia conflicto)`;
       const copyNote = await call("note_create", {
-        kind: "markdown",
+        kind: "tiptap",
         title: copyTitle,
         folder: folder || null,
       });

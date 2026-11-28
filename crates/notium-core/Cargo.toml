@@ -27,7 +27,6 @@ default = ["native"]
 native = ["dep:rusqlite", "dep:uuid", "dep:notify", "dep:icu_normalizer"]
 
 [dependencies]
-pulldown-cmark = "0.13"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 rusqlite = { version = "0.40", features = ["bundled"], optional = true }

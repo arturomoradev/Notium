@@ -1,7 +1,7 @@
 {
   "note_id": "note_math-mermaid",
   "title": "Diagrams",
-  "editor": "markdown",
+  "editor": "tiptap",
   "meta": {
     "created_at": null,
     "updated_at": null,

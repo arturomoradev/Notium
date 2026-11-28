@@ -35,7 +35,7 @@ export interface FolderDto {
 export interface NoteSummaryDto {
   note_id: string;
   title: string;
-  format: "markdown";
+  format: "tiptap";
   path: string;
   updated_at: string | null;
   tags: string[];

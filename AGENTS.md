@@ -4,6 +4,24 @@ These guidelines apply permanently and automatically in all sessions on the `Not
 
 Machine-specific values (repo name, production URL, `<INSTALL_DIR>`, `<ANDROID_SDK>`, `<NDK_VERSION>`) live in the untracked `AGENTS.local.md`; read it before deploying.
 
+## 0. Fork exception: `experiment/html-editor` (overrides section 1)
+
+This checkout is a parallel experiment (HTML-based editor) living on the `experiment/html-editor` branch, not `master`/`main`.
+
+- **No automatic deployment.** Do not build or install for PC or Android unless the user explicitly asks for it in that moment. Never deploy the web app or the sync server from this branch (`npm run cloud:deploy:web`, `npm run cloud:deploy`).
+- **Never push to `main`** and never merge this branch into `master` unless the user asks. Pushing the branch itself (`git push origin experiment/html-editor`) is fine as a backup.
+- **Separate identity:** identifier `dev.notium.html`, name "Notium HTML" (Android package `dev.notium.html`), so it installs beside the main app with its own data folder.
+- **PC install (only when asked):** same folder as the main app, different file name:
+  ```powershell
+  npm run tauri build -- --no-bundle
+  Stop-Process -Name NotiumHTML -ErrorAction SilentlyContinue
+  Copy-Item "target\release\notium.exe" "<INSTALL_DIR>\NotiumHTML.exe" -Force
+  ```
+- **Android install (only when asked):** same commands as section 1.4, but restart with `adb shell am force-stop dev.notium.html` and `adb shell am start -n dev.notium.html/.MainActivity`.
+- **Sync bridge:** `src-tauri/src/sync.rs` reads/writes `.app/sync_config.html-fork.json` (never the main app's `sync_config.json`), uses keyring service `dev.notium.html.sync`, and forces sync off. Remove the bridge in `load_sync_config` only when the user asks.
+- Fork-specific pending work lives in [`docs/FORK_HTML_EDITOR_ROADMAP.md`](docs/FORK_HTML_EDITOR_ROADMAP.md) (structural JSON merge before sync, editor gaps).
+- Verification (section 3) and commits (section 2) still apply. `npm run test:markdown` is now `npm run test:editor`.
+
 ## 1. Automatic Deployment After Each Modification (MANDATORY)
 
 **Whenever you make a modification to the project code, once it is verified (section 3) and committed, you MUST ship it everywhere: GitHub, web (production), PC and Android.** If a step fails, stop and report it; do not skip it silently.

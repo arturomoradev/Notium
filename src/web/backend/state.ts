@@ -31,7 +31,7 @@ export interface WireOp {
 
 export interface WebNote {
   id: string;
-  /** Full file contents, frontmatter included. */
+  /** Full file contents: the JSON envelope with the Tiptap doc. */
   doc: string;
   rev: number;
   /** Unix seconds of the last change seen. */
@@ -63,7 +63,7 @@ export interface VaultState {
   clock: Hlc;
   /** Note id -> stamp of its latest path change (see `pathStamp`). */
   pathStamps: Record<string, string>;
-  /** Folders announced by devices (path under notes/markdown); absent in older saved states. */
+  /** Folders announced by devices (path under notes/tiptap); absent in older saved states. */
   folders?: Record<string, true>;
 }
 
@@ -225,7 +225,7 @@ export function localOp(
   return note;
 }
 
-/** Record a local folder create/delete (path under notes/markdown), queued like `localOp`. */
+/** Record a local folder create/delete (path under notes/tiptap), queued like `localOp`. */
 export function folderOp(
   state: VaultState,
   deviceId: string,
@@ -249,28 +249,38 @@ export function folderOp(
   else state.folders[folder] = true;
 }
 
-/** Frontmatter block (with delimiters) and body, split like the native app. */
-export const splitDoc = (doc: string): [string, string] => core.splitDoc(doc);
+/** The editor's part of a note file: its Tiptap doc as JSON. */
+export const docOf = (file: string): string => core.docJson(file);
 
-/** Same as the native save (commands.rs `save_impl`): keep the frontmatter, swap the body, keep the id, bump `updated`. */
-export function stitchDoc(previous: string, body: string, noteId: string, ts = nowSecs()): string {
-  const [prefix] = splitDoc(previous);
-  const full = core.injectNotiumId(prefix + body, noteId);
+/** Same as the native save (commands.rs `save_impl`): swap the doc, keep the id, bump `updated`. Throws on a malformed doc. */
+export function stitchDoc(previous: string, doc: string, noteId: string, ts = nowSecs()): string {
+  const full = core.injectNotiumId(core.withDoc(previous, doc), noteId);
   return core.upsertField(full, "updated", String(ts));
 }
 
-/** The device's template for a new Markdown note (vault.rs `create_note_in`). */
-export function newDoc(noteId: string, ts = nowSecs()): string {
-  return `---\nnotium_id: ${noteId}\ncreated: ${ts}\nupdated: ${ts}\n---\n`;
-}
+/** A new, empty note file (vault.rs `create_note_in`). */
+export const newDoc = (noteId: string, ts = nowSecs()): string => core.newNote(noteId, String(ts));
 
 const extracted = new Map<string, { doc: string; info: core.Extracted }>();
+const unreadable: core.Extracted = {
+  title: "",
+  tags: [],
+  plain_text: "",
+  out_links: [],
+  attachment_refs: [],
+};
 
 /** Native extraction of a note (title, tags, links, plain text), cached per content. */
 export function infoOf(note: WebNote): core.Extracted {
   const hit = extracted.get(note.id);
   if (hit?.doc === note.doc) return hit.info;
-  const info = core.extractMarkdown(note.id, note.doc);
+  // A file that is not a note (e.g. a malformed op) must not break the listing.
+  let info = unreadable;
+  try {
+    info = core.extractNote(note.id, note.doc);
+  } catch {
+    /* listed by its path, without tags or links */
+  }
   extracted.set(note.id, { doc: note.doc, info });
   return info;
 }
@@ -284,8 +294,8 @@ export function titleOf(note: WebNote): string {
   if (note.path) return core.titleFromPath(note.path);
   const heading = infoOf(note).title.trim();
   if (heading) return heading;
-  const line = splitDoc(note.doc)[1]
-    .split("\n")
+  const line = infoOf(note)
+    .plain_text.split("\n")
     .find((l) => l.trim())
     ?.trim();
   return line ? line.slice(0, 80) : `Nota ${note.id.slice(0, 8)}`;

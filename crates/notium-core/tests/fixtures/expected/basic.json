@@ -1,13 +1,13 @@
 {
   "note_id": "note_basic",
   "title": "Introduction",
-  "editor": "markdown",
+  "editor": "tiptap",
   "meta": {
     "created_at": null,
     "updated_at": null,
     "tags": []
   },
-  "plain_text": "Introduction\nThis is a paragraph with bold and italic and inline code.\nSection Two\nnested\nitem oneitem two\nfirstsecond\ndone taskopen task\nCol ACol Ba1b1\nfn main() { println!(\"hi\"); }\nstrikethrough",
+  "plain_text": "Introduction\nThis is a paragraph with bold and italic and inline code.\nSection Two\nitem one\nitem two\nnested\nfirst\nsecond\ndone task\nopen task\nCol A\nCol B\na1\nb1\nfn main() { println!(\"hi\"); }\nstrikethrough",
   "tags": [],
   "out_links": [],
   "attachment_refs": [],
@@ -31,34 +31,28 @@
       "body": "Section Two"
     },
     {
-      "chunk_id": "9a56d264641ac1cab3e1a277d5790007",
+      "chunk_id": "b5cca01516de6856deaa2107a0a7adce",
       "kind": "list",
       "heading_path": "Introduction > Section Two",
-      "body": "nested"
+      "body": "item one\nitem two\nnested"
     },
     {
-      "chunk_id": "036d522be2aee1e86118ee151f5d7869",
+      "chunk_id": "da4db7e48db4d75ea5ffb320cf357d4e",
       "kind": "list",
       "heading_path": "Introduction > Section Two",
-      "body": "item oneitem two"
+      "body": "first\nsecond"
     },
     {
-      "chunk_id": "cdba091204a46ddb71d249d9fedf4ba4",
+      "chunk_id": "5cd34ced646d692f26ca7d72d23143c4",
       "kind": "list",
       "heading_path": "Introduction > Section Two",
-      "body": "firstsecond"
+      "body": "done task\nopen task"
     },
     {
-      "chunk_id": "44086b5abb11d15ec79991da15048c13",
-      "kind": "list",
-      "heading_path": "Introduction > Section Two",
-      "body": "done taskopen task"
-    },
-    {
-      "chunk_id": "ca8572bbbd27871e6346c04bf208d575",
+      "chunk_id": "b942ccaed939aff6551749fc6144baf6",
       "kind": "table",
       "heading_path": "Introduction > Section Two",
-      "body": "Col ACol Ba1b1"
+      "body": "Col A\nCol B\na1\nb1"
     },
     {
       "chunk_id": "66a0b4d85f634549addbf803f9f43dfa",

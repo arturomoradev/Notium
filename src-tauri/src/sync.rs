@@ -318,7 +318,7 @@ mod urlencoding {
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 mod os_token_store {
-    const SERVICE: &str = "dev.notium.app.sync";
+    const SERVICE: &str = "dev.notium.html.sync";
 
     /// Store (or, for an empty token, delete) the credential. Returns whether
     /// the credential store now reflects `token`.
@@ -405,7 +405,7 @@ fn write_config_file(
         on_disk.auth_token.clear();
     }
     let json = serde_json::to_vec_pretty(&on_disk)?;
-    vault::atomic_write(&app_dir.join("sync_config.json"), &json)?;
+    vault::atomic_write(&app_dir.join(CONFIG_FILE), &json)?;
     Ok(())
 }
 
@@ -448,7 +448,23 @@ fn vault_binding(vault_root: &Path) -> String {
 /// auth token from the OS credential store. A plaintext token left in the file
 /// by an older version is migrated to the credential store on first load.
 pub fn load_sync_config(vault_root: &Path) -> SyncConfig {
-    let p = vault_root.join(".app").join("sync_config.json");
+    #[cfg_attr(test, allow(unused_mut))]
+    let mut cfg = load_sync_config_file(vault_root);
+    // shortcut: fork bridge, sync is always off so this build never talks to the
+    // real account; delete this line (and CONFIG_FILE) to re-enable sync.
+    #[cfg(not(test))]
+    {
+        cfg.enabled = false;
+    }
+    cfg
+}
+
+/// Fork bridge: its own file, so it never reads or rewrites the main app's
+/// `sync_config.json` when both open the same vault folder.
+pub(crate) const CONFIG_FILE: &str = "sync_config.html-fork.json";
+
+fn load_sync_config_file(vault_root: &Path) -> SyncConfig {
+    let p = vault_root.join(".app").join(CONFIG_FILE);
     let binding = vault_binding(vault_root);
     if let Ok(bytes) = fs::read(&p) {
         if let Ok(mut cfg) = serde_json::from_slice::<SyncConfig>(&bytes) {
@@ -642,7 +658,7 @@ fn journal_external_edits(h: &mut VaultHandle, device_id: &str) -> Result<usize,
         let bytes = h.vault.read(&rec.path)?;
         // A file carrying another note's id (a conflict copy, a duplicated file)
         // would spread the collision to every device: leave it local.
-        if vault::extract_embedded_id(&bytes, EditorKind::Markdown).as_deref()
+        if vault::extract_embedded_id(&bytes, EditorKind::Tiptap).as_deref()
             != Some(rec.note_id.as_str())
         {
             continue;
@@ -671,7 +687,7 @@ fn journal_external_edits(h: &mut VaultHandle, device_id: &str) -> Result<usize,
 }
 
 /// Folders ride the note journal as content-less ops on `folder:<path under
-/// notes/markdown>`, so empty folders reach other devices without a server change.
+/// notes/tiptap>`, so empty folders reach other devices without a server change.
 pub const FOLDER_OP_PREFIX: &str = "folder:";
 const SYNCED_FOLDERS_META: &str = "synced_folders";
 
@@ -691,7 +707,7 @@ fn save_synced_folders(h: &mut VaultHandle, set: &BTreeSet<String>) -> Result<()
 /// since the last sync. Diffing the disk catches every way a folder changes
 /// (create, rename, delete, move, edits outside the app).
 fn journal_folder_changes(h: &mut VaultHandle, device_id: &str) -> Result<(), CommandError> {
-    let prefix = format!("{}/", vault::NOTES_MD);
+    let prefix = format!("{}/", vault::NOTES_DIR);
     let local: BTreeSet<String> = crate::commands::list_folders_impl(h)?
         .into_iter()
         .filter_map(|f| f.path.strip_prefix(&prefix).map(str::to_string))
@@ -728,7 +744,7 @@ fn apply_folder_op(h: &mut VaultHandle, folder: &str, delete: bool) -> Result<bo
     if clean.is_empty() {
         return Ok(false);
     }
-    let dir = h.vault.root.join(vault::NOTES_MD).join(&clean);
+    let dir = h.vault.root.join(vault::NOTES_DIR).join(&clean);
     let mut known = synced_folders(h)?;
     let changed = if delete {
         known.remove(&clean);
@@ -874,7 +890,7 @@ fn apply_one(h: &mut VaultHandle, op: &Op, device_id: &str) -> Result<Applied, C
         p.to_string()
     } else {
         let title = derive_note_title(&op.content, &op.note_id);
-        let mut candidate = h.vault.dedup_path("notes/markdown", &title, "md");
+        let mut candidate = h.vault.dedup_path("notes/tiptap", &title, "json");
         let mut n = 2;
         while h
             .index
@@ -883,7 +899,7 @@ fn apply_one(h: &mut VaultHandle, op: &Op, device_id: &str) -> Result<Applied, C
         {
             candidate = h
                 .vault
-                .dedup_path("notes/markdown", &format!("{title} {n}"), "md");
+                .dedup_path("notes/tiptap", &format!("{title} {n}"), "json");
             n += 1;
         }
         candidate
@@ -924,8 +940,8 @@ fn apply_one(h: &mut VaultHandle, op: &Op, device_id: &str) -> Result<Applied, C
             // leave two files with one id.
             if h.vault.exists(&target) && !carries_id(h, &target, &op.note_id) {
                 let title = vault::title_from_path(&target);
-                let dir = target.rsplit_once('/').map_or("notes/markdown", |(d, _)| d);
-                target = h.vault.dedup_path(dir, &title, "md");
+                let dir = target.rsplit_once('/').map_or("notes/tiptap", |(d, _)| d);
+                target = h.vault.dedup_path(dir, &title, "json");
             }
             h.vault.write_atomic(&target, content)?;
             h.sync.clear_tombstone(&op.note_id).map_err(sql_err)?;
@@ -938,7 +954,7 @@ fn apply_one(h: &mut VaultHandle, op: &Op, device_id: &str) -> Result<Applied, C
     }
 
     let (outcome, copy) =
-        sync::apply_remote_ex(&mut h.sync, &h.vault, op, "markdown", &rel_path).map_err(sql_err)?;
+        sync::apply_remote_ex(&mut h.sync, &h.vault, op, "tiptap", &rel_path).map_err(sql_err)?;
 
     let mut step = Applied::default();
     match outcome {
@@ -946,7 +962,7 @@ fn apply_one(h: &mut VaultHandle, op: &Op, device_id: &str) -> Result<Applied, C
             if let Ok(bytes) = h.vault.read(&rel_path) {
                 let _ = h
                     .index
-                    .reindex_note(&op.note_id, &rel_path, EditorKind::Markdown, &bytes);
+                    .reindex_note(&op.note_id, &rel_path, EditorKind::Tiptap, &bytes);
                 step = Applied {
                     conflict: copy.is_some(),
                     ..done
@@ -999,12 +1015,7 @@ fn journal_merge_result(
     let now = vault::now_secs();
     if let Some(copy) = copy {
         h.index
-            .reindex_note(
-                &copy.note_id,
-                &copy.path,
-                EditorKind::Markdown,
-                &copy.content,
-            )
+            .reindex_note(&copy.note_id, &copy.path, EditorKind::Tiptap, &copy.content)
             .map_err(sql_err)?;
         let hlc = h.sync.tick_hlc(now).map_err(sql_err)?;
         let create =
@@ -1067,7 +1078,7 @@ fn carries_id(h: &VaultHandle, rel_path: &str, note_id: &str) -> bool {
     h.vault
         .read(rel_path)
         .ok()
-        .and_then(|b| vault::extract_embedded_id(&b, EditorKind::Markdown))
+        .and_then(|b| vault::extract_embedded_id(&b, EditorKind::Tiptap))
         .is_some_and(|id| id == note_id)
 }
 
@@ -1321,7 +1332,7 @@ fn download_blobs(
 
 fn derive_note_title(content: &Option<Vec<u8>>, note_id: &str) -> String {
     if let Some(bytes) = content {
-        if let Ok(extracted) = notium_core::extract::extract(EditorKind::Markdown, note_id, bytes) {
+        if let Ok(extracted) = notium_core::extract::extract(EditorKind::Tiptap, note_id, bytes) {
             if !extracted.title.trim().is_empty() {
                 return extracted.title;
             }
@@ -1641,7 +1652,12 @@ mod tests {
             kind,
             base_rev: rev.saturating_sub(1),
             new_rev: rev,
-            content: Some(format!("---\nnotium_id: {note_id}\n---\n\n# Nota\n").into_bytes()),
+            content: Some(
+                notium_core::envelope::note_from_text(&format!(
+                    "---\nnotium_id: {note_id}\n---\n# Nota\n"
+                ))
+                .into_bytes(),
+            ),
             hlc: Hlc { ts, cnt: 0 },
             ts,
             path: path.map(str::to_string),
@@ -1688,7 +1704,7 @@ mod tests {
         assert_eq!(a.sync.get_unpushed_ops().unwrap().len(), 2);
 
         apply_pulled_ops(&mut b, &ops, "dev_b").unwrap();
-        let sub = b.vault.root.join("notes/markdown/Vacía/Sub");
+        let sub = b.vault.root.join("notes/tiptap/Vacía/Sub");
         assert!(sub.is_dir());
         // B received them, so it does not announce them back.
         journal_folder_changes(&mut b, "dev_b").unwrap();
@@ -1698,14 +1714,14 @@ mod tests {
         a.sync
             .mark_ops_synced(&ops.iter().map(|o| o.op_id.as_str()).collect::<Vec<_>>())
             .unwrap();
-        fs::remove_dir_all(a.vault.root.join("notes/markdown/Vacía")).unwrap();
+        fs::remove_dir_all(a.vault.root.join("notes/tiptap/Vacía")).unwrap();
         journal_folder_changes(&mut a, "dev_a").unwrap();
         let deletes = a.sync.get_unpushed_ops().unwrap();
         assert_eq!(deletes[0].note_id, "folder:Vacía/Sub", "children go first");
-        fs::write(b.vault.root.join("notes/markdown/Vacía/n.md"), "x").unwrap();
+        fs::write(b.vault.root.join("notes/tiptap/Vacía/n.json"), "x").unwrap();
         apply_pulled_ops(&mut b, &deletes, "dev_b").unwrap();
         assert!(!sub.exists());
-        assert!(b.vault.root.join("notes/markdown/Vacía").is_dir());
+        assert!(b.vault.root.join("notes/tiptap/Vacía").is_dir());
     }
 
     #[test]
@@ -1716,19 +1732,19 @@ mod tests {
             sync::OpKind::Create,
             0,
             10,
-            Some("notes/markdown/A.md"),
+            Some("notes/tiptap/A.json"),
         );
         apply_pulled_ops(&mut h, &[create], "dev_local").unwrap();
 
         // Deleted elsewhere: lands in our trash.
         apply_pulled_ops(&mut h, &[remote_delete("n1", 0, 20, false)], "dev_local").unwrap();
-        assert!(!h.vault.exists("notes/markdown/A.md"));
+        assert!(!h.vault.exists("notes/tiptap/A.json"));
         assert_eq!(trashed(&h, "n1"), 1);
 
         // A stale edit (base below the tombstone) does not bring it back.
         let stale = remote("n1", sync::OpKind::Update, 1, 25, None);
         apply_pulled_ops(&mut h, &[stale], "dev_local").unwrap();
-        assert!(!h.vault.exists("notes/markdown/A.md"));
+        assert!(!h.vault.exists("notes/tiptap/A.json"));
 
         // Restored elsewhere (built on the tombstone rev 1): back, trash empty.
         let mut restore = remote(
@@ -1736,11 +1752,11 @@ mod tests {
             sync::OpKind::Update,
             2,
             30,
-            Some("notes/markdown/A.md"),
+            Some("notes/tiptap/A.json"),
         );
         restore.base_rev = 1;
         apply_pulled_ops(&mut h, &[restore], "dev_local").unwrap();
-        assert!(h.vault.exists("notes/markdown/A.md"));
+        assert!(h.vault.exists("notes/tiptap/A.json"));
         assert!(!h.index.get_note("n1").unwrap().unwrap().tombstoned);
         assert_eq!(trashed(&h, "n1"), 0);
 
@@ -1759,20 +1775,20 @@ mod tests {
             sync::OpKind::Create,
             0,
             10,
-            Some("notes/markdown/A.md"),
+            Some("notes/tiptap/A.json"),
         );
         let bytes = create.content.clone().unwrap();
         apply_pulled_ops(&mut h, &[create], "dev_local").unwrap();
         apply_pulled_ops(&mut h, &[remote_delete("n1", 0, 20, false)], "dev_local").unwrap();
         // The note's file is back at its path before the restore arrives.
-        h.vault.write_atomic("notes/markdown/A.md", &bytes).unwrap();
+        h.vault.write_atomic("notes/tiptap/A.json", &bytes).unwrap();
 
         let mut restore = remote(
             "n1",
             sync::OpKind::Update,
             2,
             30,
-            Some("notes/markdown/A.md"),
+            Some("notes/tiptap/A.json"),
         );
         restore.base_rev = 1;
         apply_pulled_ops(&mut h, &[restore], "dev_local").unwrap();
@@ -1783,7 +1799,7 @@ mod tests {
             .into_iter()
             .map(|n| n.rel_path)
             .collect();
-        assert_eq!(files, ["notes/markdown/A.md"]);
+        assert_eq!(files, ["notes/tiptap/A.json"]);
         assert!(!h.index.get_note("n1").unwrap().unwrap().tombstoned);
     }
 
@@ -1793,7 +1809,7 @@ mod tests {
         let note = create_impl_for_test(&mut h, "Pendientes");
         let real = path_of(&h, &note);
         // An older copy carrying the same id, named so it sorts first.
-        let copy = "notes/markdown/Nota note_01a.md";
+        let copy = "notes/tiptap/Nota note_01a.json";
         h.vault
             .write_atomic(copy, &h.vault.read(&real).unwrap())
             .unwrap();
@@ -1820,11 +1836,11 @@ mod tests {
             sync::OpKind::Create,
             0,
             10,
-            Some("notes/markdown/A.md"),
+            Some("notes/tiptap/A.json"),
         );
         apply_pulled_ops(&mut h, &[create], "dev_local").unwrap();
         apply_pulled_ops(&mut h, &[remote_delete("n1", 5, 20, true)], "dev_local").unwrap();
-        assert!(h.vault.exists("notes/markdown/A.md"));
+        assert!(h.vault.exists("notes/tiptap/A.json"));
     }
 
     #[test]
@@ -1835,10 +1851,10 @@ mod tests {
             sync::OpKind::Create,
             0,
             10,
-            Some("notes/markdown/A.md"),
+            Some("notes/tiptap/A.json"),
         );
         apply_pulled_ops(&mut h, &[create], "dev_local").unwrap();
-        h.vault.delete_to_trash("notes/markdown/A.md").unwrap();
+        h.vault.delete_to_trash("notes/tiptap/A.json").unwrap();
         h.index.mark_tombstoned("n1").unwrap();
         journal_local_delete(&mut h, "n1", 100).unwrap();
         let del = h.sync.get_unpushed_ops().unwrap().pop().unwrap();
@@ -1849,12 +1865,12 @@ mod tests {
         h.vault.restore_from_trash(&trash_id).unwrap();
         h.sync.clear_tombstone("n1").unwrap();
         h.index.reconcile(&h.vault).unwrap();
-        journal_local_path(&mut h, "n1", "notes/markdown/A.md").unwrap();
+        journal_local_path(&mut h, "n1", "notes/tiptap/A.json").unwrap();
         let restore = h.sync.get_unpushed_ops().unwrap().pop().unwrap();
         // Built on the tombstone rev, so peers treat it as a restore.
         assert_eq!((restore.base_rev, restore.new_rev), (1, 2));
         assert!(restore.content.is_some());
-        assert_eq!(restore.path.as_deref(), Some("notes/markdown/A.md"));
+        assert_eq!(restore.path.as_deref(), Some("notes/tiptap/A.json"));
     }
 
     #[test]
@@ -1865,22 +1881,22 @@ mod tests {
             sync::OpKind::Create,
             0,
             10,
-            Some("notes/markdown/Dir/Plan.md"),
+            Some("notes/tiptap/Dir/Plan.json"),
         );
         apply_pulled_ops(&mut h, &[create], "dev_local").unwrap();
-        assert_eq!(path_of(&h, "n1"), "notes/markdown/Dir/Plan.md");
+        assert_eq!(path_of(&h, "n1"), "notes/tiptap/Dir/Plan.json");
 
         let rename = remote(
             "n1",
             sync::OpKind::Update,
             1,
             20,
-            Some("notes/markdown/Plan final.md"),
+            Some("notes/tiptap/Plan final.json"),
         );
         apply_pulled_ops(&mut h, &[rename], "dev_local").unwrap();
-        assert_eq!(path_of(&h, "n1"), "notes/markdown/Plan final.md");
-        assert!(h.vault.exists("notes/markdown/Plan final.md"));
-        assert!(!h.vault.exists("notes/markdown/Dir/Plan.md"));
+        assert_eq!(path_of(&h, "n1"), "notes/tiptap/Plan final.json");
+        assert!(h.vault.exists("notes/tiptap/Plan final.json"));
+        assert!(!h.vault.exists("notes/tiptap/Dir/Plan.json"));
 
         // An older path change arriving late does not move it back.
         let stale = remote(
@@ -1888,10 +1904,10 @@ mod tests {
             sync::OpKind::Update,
             2,
             15,
-            Some("notes/markdown/Viejo.md"),
+            Some("notes/tiptap/Viejo.json"),
         );
         apply_pulled_ops(&mut h, &[stale], "dev_local").unwrap();
-        assert_eq!(path_of(&h, "n1"), "notes/markdown/Plan final.md");
+        assert_eq!(path_of(&h, "n1"), "notes/tiptap/Plan final.json");
     }
 
     #[test]
@@ -1902,14 +1918,14 @@ mod tests {
             sync::OpKind::Create,
             0,
             10,
-            Some("notes/markdown/A.md"),
+            Some("notes/tiptap/A.json"),
         );
         let b = remote(
             "b",
             sync::OpKind::Create,
             0,
             11,
-            Some("notes/markdown/B.md"),
+            Some("notes/tiptap/B.json"),
         );
         apply_pulled_ops(&mut h, &[a, b], "dev_local").unwrap();
 
@@ -1918,18 +1934,18 @@ mod tests {
             sync::OpKind::Update,
             1,
             20,
-            Some("notes/markdown/A.md"),
+            Some("notes/tiptap/A.json"),
         );
         let escape = remote(
             "a",
             sync::OpKind::Update,
             1,
             21,
-            Some("notes/markdown/../../x.md"),
+            Some("notes/tiptap/../../x.json"),
         );
         apply_pulled_ops(&mut h, &[clash, escape], "dev_local").unwrap();
-        assert_eq!(path_of(&h, "a"), "notes/markdown/A.md");
-        assert_eq!(path_of(&h, "b"), "notes/markdown/B.md");
+        assert_eq!(path_of(&h, "a"), "notes/tiptap/A.json");
+        assert_eq!(path_of(&h, "b"), "notes/tiptap/B.json");
     }
 
     #[test]
@@ -1940,17 +1956,17 @@ mod tests {
             sync::OpKind::Create,
             0,
             10,
-            Some("notes/markdown/Uno.md"),
+            Some("notes/tiptap/Uno.json"),
         );
         apply_pulled_ops(&mut h, &[create], "dev_local").unwrap();
         h.vault
-            .move_to("notes/markdown/Uno.md", "notes/markdown/Dos.md")
+            .move_to("notes/tiptap/Uno.json", "notes/tiptap/Dos.json")
             .unwrap();
         h.index.reconcile(&h.vault).unwrap();
-        journal_local_path(&mut h, "n1", "notes/markdown/Dos.md").unwrap();
+        journal_local_path(&mut h, "n1", "notes/tiptap/Dos.json").unwrap();
         let ops = h.sync.get_unpushed_ops().unwrap();
         let op = ops.last().unwrap();
-        assert_eq!(op.path.as_deref(), Some("notes/markdown/Dos.md"));
+        assert_eq!(op.path.as_deref(), Some("notes/tiptap/Dos.json"));
         assert_eq!((op.base_rev, op.new_rev), (0, 1));
         // The local change outranks the remote create it renamed.
         assert!(op.hlc.ts >= 10);
@@ -2087,7 +2103,13 @@ mod tests {
     fn test_heal_tombstoned_deletes_journals_missing_ops() {
         let (_d, mut h) = temp_vault();
         h.vault
-            .write_atomic("notes/markdown/Foo.md", b"# Foo\n\nbody\n")
+            .write_atomic(
+                "notes/tiptap/Foo.json",
+                notium_core::envelope::note_from_text(&String::from_utf8_lossy(
+                    b"# Foo\n\nbody\n".as_ref(),
+                ))
+                .as_bytes(),
+            )
             .unwrap();
         h.index.reconcile(&h.vault).unwrap();
         let note_id = h.index.list_notes().unwrap()[0].note_id.clone();
@@ -2124,8 +2146,11 @@ mod tests {
 
         // Edited outside the app: one update op built on the synced rev.
         let path = path_of(&h, &note);
-        let mut bytes = h.vault.read(&path).unwrap();
-        bytes.extend_from_slice(b"- [x] done\n");
+        let old = String::from_utf8(h.vault.read(&path).unwrap()).unwrap();
+        let doc = notium_core::envelope::doc_from_text("done").to_string();
+        let bytes = notium_core::envelope::with_doc(&old, &doc)
+            .unwrap()
+            .into_bytes();
         std::fs::write(h.vault.root.join(&path), &bytes).unwrap();
         let rev = h.sync.get_current(&note).unwrap().unwrap().0;
         assert_eq!(journal_external_edits(&mut h, "dev_a").unwrap(), 1);
@@ -2140,16 +2165,22 @@ mod tests {
 
         // A file dropped into the vault: a create op with its path.
         h.vault
-            .write_atomic("notes/markdown/Bar.md", b"# Bar\n")
+            .write_atomic(
+                "notes/tiptap/Bar.json",
+                notium_core::envelope::note_from_text(&String::from_utf8_lossy(
+                    b"# Bar\n".as_ref(),
+                ))
+                .as_bytes(),
+            )
             .unwrap();
         assert_eq!(journal_external_edits(&mut h, "dev_a").unwrap(), 1);
         let op = h.sync.get_unpushed_ops().unwrap().pop().unwrap();
         assert_eq!(op.kind, sync::OpKind::Create);
-        assert_eq!(op.path.as_deref(), Some("notes/markdown/Bar.md"));
+        assert_eq!(op.path.as_deref(), Some("notes/tiptap/Bar.json"));
 
         // A copy carrying Foo's id (conflict copy) stays local.
         h.vault
-            .write_atomic("notes/markdown/Foo (conflict).md", &bytes)
+            .write_atomic("notes/tiptap/Foo (conflict).json", &bytes)
             .unwrap();
         assert_eq!(journal_external_edits(&mut h, "dev_a").unwrap(), 0);
 
@@ -2160,7 +2191,7 @@ mod tests {
 
     /// A note created through the app's create path (journaled + current set).
     fn create_impl_for_test(h: &mut VaultHandle, title: &str) -> String {
-        crate::commands::create_impl(h, "markdown", Some(title), None)
+        crate::commands::create_impl(h, "tiptap", Some(title), None)
             .unwrap()
             .note
             .note_id
@@ -2228,7 +2259,10 @@ mod tests {
                         base_rev: 0,
                         new_rev: 0,
                         content: Some(
-                            b"# Nota desde la nube\n\nContenido sincronizado.\n".to_vec(),
+                            notium_core::envelope::note_from_text(
+                                "# Nota desde la nube\n\nContenido sincronizado.\n",
+                            )
+                            .into_bytes(),
                         ),
                         hlc: Hlc::origin().tick(10),
                         ts: 1000,

@@ -1,0 +1,93 @@
+{
+  "doc": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 1
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Links"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "See "
+          },
+          {
+            "type": "wikiLink",
+            "attrs": {
+              "target": "Target",
+              "embed": false
+            }
+          },
+          {
+            "type": "text",
+            "text": " and "
+          },
+          {
+            "type": "wikiLink",
+            "attrs": {
+              "target": "Target|Alias",
+              "embed": false
+            }
+          },
+          {
+            "type": "text",
+            "text": " and "
+          },
+          {
+            "type": "wikiLink",
+            "attrs": {
+              "target": "Target#Heading",
+              "embed": false
+            }
+          },
+          {
+            "type": "text",
+            "text": "."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Embed a note: "
+          },
+          {
+            "type": "wikiLink",
+            "attrs": {
+              "target": "EmbeddedNote",
+              "embed": true
+            }
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Embed an image: "
+          },
+          {
+            "type": "wikiLink",
+            "attrs": {
+              "target": "image-001.jpg",
+              "embed": true
+            }
+          }
+        ]
+      }
+    ]
+  }
+}

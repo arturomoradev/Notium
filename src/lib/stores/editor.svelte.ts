@@ -6,7 +6,7 @@ import {
   type ToolbarAction,
 } from "../../components/editors/toolbar";
 
-export type EditorKind = "markdown";
+export type EditorKind = "tiptap";
 export type ViewMode = "edit" | "reading";
 
 // Per device, like Obsidian's mobile toolbar: a phone and a PC want different bars.
@@ -56,7 +56,7 @@ class EditorStore {
     }
   }
 
-  current(activeFormat: EditorKind = "markdown"): EditorHandle | undefined {
+  current(activeFormat: EditorKind = "tiptap"): EditorHandle | undefined {
     return this.mounted?.format === activeFormat ? this.mounted.handle : undefined;
   }
 

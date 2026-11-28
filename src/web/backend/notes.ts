@@ -14,7 +14,7 @@ import {
   localOp,
   newDoc,
   nowSecs,
-  splitDoc,
+  docOf,
   stitchDoc,
   tagsOf,
   titleOf,
@@ -27,20 +27,20 @@ import { deviceId, persist, schedulePush, vault } from "./sync.ts";
 export const liveNotes = (): WebNote[] =>
   Object.values(vault.state.notes).filter((n) => !n.deleted);
 
-const NOTES_DIR = "notes/markdown";
+const NOTES_DIR = "notes/tiptap";
 
 /** Vault-relative path: the synced one, or where devices place older notes. */
-export const pathOf = (n: WebNote): string => n.path ?? `${NOTES_DIR}/${titleOf(n)}.md`;
+export const pathOf = (n: WebNote): string => n.path ?? `${NOTES_DIR}/${titleOf(n)}.json`;
 
-/** Same as `LocalVault::dedup_path`: `Title.md`, then `Title 2.md`, … */
+/** Same as `LocalVault::dedup_path`: `Title.json`, then `Title 2.json`, … */
 function dedupPath(dir: string, title: string, exceptId?: string): string {
   const taken = new Set(
     liveNotes()
       .filter((n) => n.id !== exceptId)
       .map(pathOf),
   );
-  let path = `${dir}/${title}.md`;
-  for (let n = 2; taken.has(path); n++) path = `${dir}/${title} ${n}.md`;
+  let path = `${dir}/${title}.json`;
+  for (let n = 2; taken.has(path); n++) path = `${dir}/${title} ${n}.json`;
   return path;
 }
 
@@ -53,7 +53,7 @@ export function summary(n: WebNote): NoteSummaryDto {
   return {
     note_id: n.id,
     title: titleOf(n),
-    format: "markdown",
+    format: "tiptap",
     path: pathOf(n),
     updated_at: String(n.updated),
     tags: tagsOf(n),
@@ -68,7 +68,7 @@ export function find(noteId: string): WebNote {
 
 const contentDto = (n: WebNote): NoteContentDto => ({
   note: summary(n),
-  content: splitDoc(n.doc)[1],
+  content: docOf(n.doc),
   rev: n.rev,
 });
 
@@ -103,7 +103,7 @@ export async function saveNote(
 ): Promise<SaveResultDto> {
   const n = find(noteId);
   // Saves without edits (e.g. on blur) must not create ops.
-  if (content === splitDoc(n.doc)[1]) return { rev: n.rev, note: summary(n) };
+  if (content === docOf(n.doc)) return { rev: n.rev, note: summary(n) };
   const saved = await commit(n.id, "update", stitchDoc(n.doc, content, n.id), baseRev);
   return { rev: saved.rev, note: summary(saved) };
 }

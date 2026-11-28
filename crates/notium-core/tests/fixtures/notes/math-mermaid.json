@@ -1,0 +1,52 @@
+{
+  "doc": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 1
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Diagrams"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Inline math $E=mc^2$."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "math"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "\\int_0^1 x^2 dx"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "mermaid"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "graph TD; A-->B;"
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -7,8 +7,8 @@ import type {
   LinkRepairResultDto,
   OutlinkDto,
 } from "../../lib/ipc/types.ts";
-import { normalizeTitle, rewriteWikilinkTargets } from "../core.ts";
-import { infoOf, splitDoc, titleOf, type WebNote } from "./state.ts";
+import { docJson, normalizeTitle, rewriteNoteLinks } from "../core.ts";
+import { infoOf, titleOf, type WebNote } from "./state.ts";
 
 /** A note's resolvable names, built once per call over the live notes. */
 function resolver(notes: WebNote[], pathOf: (n: WebNote) => string) {
@@ -144,7 +144,7 @@ export function linkReferences(
   oldTitle: string,
 ): LinkReferenceDto[] {
   return notes
-    .map((n) => ({ n, count: rewriteWikilinkTargets(n.doc, oldTitle, "PLACEHOLDER")[1] }))
+    .map((n) => ({ n, count: rewriteNoteLinks(n.doc, oldTitle, "PLACEHOLDER")[1] }))
     .filter(({ count }) => count > 0)
     .map(({ n, count }) => ({ note_id: n.id, title: titleOf(n), path: pathOf(n), count }))
     .sort((a, b) => a.title.localeCompare(b.title));
@@ -159,10 +159,9 @@ export function repairLinks(
   const edits: { note: WebNote; body: string }[] = [];
   let updated = 0;
   for (const note of notes) {
-    const body = splitDoc(note.doc)[1];
-    const [rewritten, count] = rewriteWikilinkTargets(body, oldTitle, newTitle);
-    if (count > 0 && rewritten !== body) {
-      edits.push({ note, body: rewritten });
+    const [rewritten, count] = rewriteNoteLinks(note.doc, oldTitle, newTitle);
+    if (count > 0 && rewritten !== note.doc) {
+      edits.push({ note, body: docJson(rewritten) });
       updated += count;
     }
   }

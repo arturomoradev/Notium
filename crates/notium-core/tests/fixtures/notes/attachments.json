@@ -1,0 +1,70 @@
+{
+  "doc": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 1
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Attachments"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A picture"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A relative link "
+          },
+          {
+            "type": "text",
+            "text": "doc",
+            "marks": [
+              {
+                "type": "link",
+                "attrs": {
+                  "href": "attachments/documento.pdf",
+                  "title": null
+                }
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": "."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Embed: "
+          },
+          {
+            "type": "wikiLink",
+            "attrs": {
+              "target": "image-002.png",
+              "embed": true
+            }
+          }
+        ]
+      }
+    ]
+  }
+}

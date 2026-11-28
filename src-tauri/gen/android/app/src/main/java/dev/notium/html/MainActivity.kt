@@ -1,4 +1,4 @@
-package dev.notium.app
+package dev.notium.html
 
 import android.content.pm.ApplicationInfo
 import android.graphics.Color
