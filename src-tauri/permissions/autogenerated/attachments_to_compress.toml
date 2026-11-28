@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-attachments-to-compress"
+description = "Enables the attachments_to_compress command without any pre-configured scope."
+commands.allow = ["attachments_to_compress"]
+
+[[permission]]
+identifier = "deny-attachments-to-compress"
+description = "Denies the attachments_to_compress command without any pre-configured scope."
+commands.deny = ["attachments_to_compress"]

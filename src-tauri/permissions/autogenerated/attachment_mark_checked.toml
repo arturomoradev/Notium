@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-attachment-mark-checked"
+description = "Enables the attachment_mark_checked command without any pre-configured scope."
+commands.allow = ["attachment_mark_checked"]
+
+[[permission]]
+identifier = "deny-attachment-mark-checked"
+description = "Denies the attachment_mark_checked command without any pre-configured scope."
+commands.deny = ["attachment_mark_checked"]
