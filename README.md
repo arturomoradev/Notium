@@ -1,5 +1,7 @@
 # Notium
 
+**English** | [Español](README.es.md)
+
 Local-first Markdown note app — **Phase 1 complete** (production monorepo, Obsidian-style Markdown editor with live preview, formatting toolbar, watcher, Android).
 
 - **Framework:** Tauri 2 (Rust) + Svelte 5 / TypeScript
