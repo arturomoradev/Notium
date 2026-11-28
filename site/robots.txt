@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://arturomoradev.github.io/Notium/sitemap.xml

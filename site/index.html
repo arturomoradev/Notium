@@ -3,9 +3,43 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Notium — Tus notas, en tus archivos</title>
+<title>Notium — App de notas en Markdown local-first para PC, Android y web</title>
 <meta name="description" content="Notium es una app de notas en Markdown local-first: tus notas son archivos .md en tu dispositivo, enlazadas entre sí y sincronizadas entre PC, Android y web.">
+<meta name="robots" content="index, follow, max-image-preview:large">
+<link rel="canonical" href="https://arturomoradev.github.io/Notium/">
 <meta name="theme-color" content="#3b3fe0">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="Notium">
+<meta property="og:locale" content="es_ES">
+<meta property="og:url" content="https://arturomoradev.github.io/Notium/">
+<meta property="og:title" content="Notium — Tus notas, en tus archivos">
+<meta property="og:description" content="App de notas en Markdown local-first, con wikilinks, búsqueda instantánea y sincronización entre PC, Android y web. Gratis y de código abierto.">
+<meta property="og:image" content="https://arturomoradev.github.io/Notium/og.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="Logo de Notium con el lema: Tus notas, en tus archivos">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Notium — Tus notas, en tus archivos">
+<meta name="twitter:description" content="App de notas en Markdown local-first para PC, Android y web.">
+<meta name="twitter:image" content="https://arturomoradev.github.io/Notium/og.png">
+<link rel="apple-touch-icon" href="icon-192.png">
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "SoftwareApplication",
+  "name": "Notium",
+  "url": "https://arturomoradev.github.io/Notium/",
+  "image": "https://arturomoradev.github.io/Notium/icon-512.png",
+  "description": "App de notas en Markdown local-first: tus notas son archivos .md en tu dispositivo, enlazadas entre sí y sincronizadas entre PC, Android y web.",
+  "applicationCategory": "ProductivityApplication",
+  "operatingSystem": "Windows, Android, Web",
+  "softwareVersion": "0.1.3",
+  "inLanguage": "es",
+  "downloadUrl": "https://github.com/arturomoradev/Notium/releases/latest",
+  "sameAs": "https://github.com/arturomoradev/Notium",
+  "offers": { "@type": "Offer", "price": "0", "priceCurrency": "EUR" }
+}
+</script>
 <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 512 512'%3E%3Crect width='512' height='512' rx='24' fill='%233b3fe0'/%3E%3Cpath d='M168.96 363.52V158.72l174.08 194.56V248.64' fill='none' stroke='%23fff' stroke-width='46' stroke-linecap='round' stroke-linejoin='round'/%3E%3Ccircle cx='343.04' cy='171.33' r='35.84' fill='%237cf5c8'/%3E%3C/svg%3E">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -150,13 +184,14 @@
   .mock-bar .sync { margin-left: auto; display: inline-flex; align-items: center; gap: 6px; color: var(--mint-ink); font-weight: 500; }
   .mock-bar .sync svg { width: 14px; height: 14px; }
   .side { border-right: 1px solid var(--border); padding: 14px 10px; font-size: 13px; color: var(--muted); }
-  .side h6, .right h6 { margin: 0 0 8px 6px; font-size: 11px; text-transform: uppercase; letter-spacing: .08em; font-weight: 600; color: var(--muted); opacity: .8; }
+  [hidden] { display: none !important; }
+  .side .lbl, .right .lbl { display: block; margin: 0 0 8px 6px; font-size: 11px; text-transform: uppercase; letter-spacing: .08em; font-weight: 600; color: var(--muted); opacity: .8; }
   .tree div { padding: 5px 8px; border-radius: 6px; display: flex; gap: 8px; align-items: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .tree div.on { background: var(--tag-bg); color: var(--text); font-weight: 500; }
   .tree .ind { padding-left: 24px; }
   .tree svg { width: 14px; height: 14px; flex: none; opacity: .7; }
   .editor { padding: 28px 36px; font-size: 15px; line-height: 1.7; }
-  .editor h2 { font-size: 26px; margin: 0 0 6px; letter-spacing: -.02em; }
+  .editor .nt { font-weight: 700; line-height: 1.2; font-size: 26px; margin: 0 0 6px; letter-spacing: -.02em; }
   .editor .meta { font: 12px/1.6 "JetBrains Mono", monospace; color: var(--muted); margin-bottom: 18px; }
   .editor p { margin: 0 0 12px; }
   .wl { color: var(--link); font-weight: 500; border-bottom: 1px dashed color-mix(in srgb, var(--link) 50%, transparent); }
@@ -261,6 +296,18 @@
   .final .btn-primary { background: #fff; color: #2a2db0; box-shadow: none; }
   .final .btn-ghost { background: transparent; color: #fff; border-color: rgba(255, 255, 255, .4); }
 
+  .pre { margin-top: 24px; background: var(--surface); border: 1px dashed color-mix(in srgb, #e0a100 60%, var(--border)); border-radius: 18px; padding: 28px; }
+  .pre-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 8px; }
+  .pre h3 { margin: 0; font-size: 19px; letter-spacing: -.01em; }
+  .pre-date { color: var(--muted); font-size: 14px; }
+  .pre p { margin: 0 0 18px; color: var(--muted); max-width: 720px; }
+  .st.beta { background: rgba(224, 161, 0, .16); color: #9a6a00; font-size: 12px; font-weight: 600; padding: 3px 10px; border-radius: 999px; }
+  :root[data-theme="dark"] .st.beta { color: #f5c451; }
+  @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) .st.beta { color: #f5c451; } }
+  .pre-cta { justify-content: flex-start; align-items: center; }
+  .pre-notes { color: var(--link); font-weight: 500; font-size: 15px; }
+  .pre-notes:hover { text-decoration: underline; }
+
   footer { padding: 40px 0 48px; color: var(--muted); font-size: 14px; }
   footer .wrap { display: flex; justify-content: space-between; align-items: center; gap: 16px; flex-wrap: wrap; }
   .theme-toggle { background: var(--surface); border: 1px solid var(--border); color: var(--muted); border-radius: 8px; padding: 6px 10px; cursor: pointer; font: inherit; font-size: 13px; }
@@ -321,7 +368,7 @@
             <span class="sync"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.5 19a4.5 4.5 0 1 0-1.4-8.78A6 6 0 1 0 6 16.9"/><path d="m9 15 2 2 4-4"/></svg>Sincronizado</span>
           </div>
           <div class="side">
-            <h6>Archivos</h6>
+            <div class="lbl">Archivos</div>
             <div class="tree">
               <div><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>Proyectos</div>
               <div class="ind on"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><path d="M14 3v6h6"/></svg>Ideas de producto</div>
@@ -333,7 +380,7 @@
             </div>
           </div>
           <div class="editor">
-            <h2>Ideas de producto</h2>
+            <div class="nt">Ideas de producto</div>
             <div class="meta">tags: [producto, ideas] · editado hace 2 min</div>
             <p>Conectar esto con el <span class="wl">Roadmap Q1</span> y revisar las notas de <span class="wl">Entrevistas a usuarios</span>. <span class="tag">#producto</span></p>
             <p class="raw">La sintaxis se oculta mientras escribes: <b>**solo**</b> aparece en la línea activa<span class="cursor"></span></p>
@@ -343,7 +390,7 @@
             <div class="callout"><strong>💡 Idea</strong> — Búsqueda semántica sobre todo el vault.</div>
           </div>
           <div class="right">
-            <h6>Backlinks · 3</h6>
+            <div class="lbl">Backlinks · 3</div>
             <div class="bl"><b>Roadmap Q1</b><span>…priorizar las <u>Ideas de producto</u>…</span></div>
             <div class="bl"><b>2026-11-23</b><span>…revisado [[Ideas de producto]]…</span></div>
             <div class="bl"><b>Reunión equipo</b><span>…ver Ideas de producto…</span></div>
@@ -515,6 +562,21 @@ Conectar con [[<span class="s">Roadmap Q1</span>]] #producto<br><br>
         </div>
         <p><a href="https://github.com/arturomoradev/Notium/releases">Todas las versiones</a></p>
       </div>
+
+      <!-- Static links are the fallback; the script below swaps in the newest prerelease from the GitHub API. -->
+      <div class="pre" id="pre">
+        <div class="pre-head">
+          <span class="st beta">Prerelease</span>
+          <h3 id="pre-name">Notium HTML 0.1.2-html.2 (experimental)</h3>
+          <span class="pre-date" id="pre-date"></span>
+        </div>
+        <p>Prueba las novedades antes que nadie. Las prereleases son versiones experimentales: pueden tener errores, cambiar o desaparecer, y se instalan aparte de la app estable. Lee las notas de la versión antes de instalarla.</p>
+        <div class="cta pre-cta">
+          <a class="btn btn-ghost" id="pre-win" href="https://github.com/arturomoradev/Notium/releases/download/v0.1.2-html.2/NotiumHTML-windows-x64.exe">Windows (prerelease)</a>
+          <a class="btn btn-ghost" id="pre-apk" href="https://github.com/arturomoradev/Notium/releases/download/v0.1.2-html.2/NotiumHTML-android.apk">Android (prerelease)</a>
+          <a class="pre-notes" id="pre-notes" href="https://github.com/arturomoradev/Notium/releases/tag/v0.1.2-html.2">Notas de la versión →</a>
+        </div>
+      </div>
     </div>
   </section>
 </main>
@@ -538,6 +600,28 @@ Conectar con [[<span class="s">Roadmap Q1</span>]] #producto<br><br>
       root.setAttribute("data-theme", next);
       try { localStorage.setItem("notium-theme", next); } catch (e) {}
     });
+  })();
+
+  // Newest prerelease from GitHub (there is no releases/latest URL for prereleases).
+  (function () {
+    var $ = function (id) { return document.getElementById(id); };
+    fetch("https://api.github.com/repos/arturomoradev/Notium/releases?per_page=30")
+      .then(function (r) { if (!r.ok) throw r.status; return r.json(); })
+      .then(function (list) {
+        var rel = list.filter(function (r) { return r.prerelease && !r.draft; })[0];
+        if (!rel) { $("pre").hidden = true; return; }
+        var asset = function (ext) {
+          return rel.assets.filter(function (a) { return a.name.toLowerCase().slice(-ext.length) === ext; })[0];
+        };
+        $("pre-name").textContent = rel.name || rel.tag_name;
+        $("pre-date").textContent = new Date(rel.published_at).toLocaleDateString("es", { day: "numeric", month: "long", year: "numeric" });
+        $("pre-notes").href = rel.html_url;
+        [["pre-win", ".exe"], ["pre-apk", ".apk"]].forEach(function (p) {
+          var a = asset(p[1]);
+          if (a) $(p[0]).href = a.browser_download_url; else $(p[0]).hidden = true;
+        });
+      })
+      .catch(function () {}); // keep the static fallback links
   })();
 </script>
 </body>
