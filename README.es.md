@@ -1,5 +1,5 @@
 <h1 align="center">
-  <img src="notium-icon.svg" alt="" width="48" align="center">
+  <img src="notium-icon.svg" alt="" height="40" align="absmiddle">
   Notium
 </h1>
 
