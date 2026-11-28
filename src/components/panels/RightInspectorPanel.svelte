@@ -1,5 +1,6 @@
 <script lang="ts">
   import { call } from "../../lib/ipc/commands";
+  import { marquee } from "../../lib/marquee";
   import Icon from "../editors/Icon.svelte";
   import ResizeHandle from "../ResizeHandle.svelte";
   import { folderOf, formatError, type ConflictItem, type PanelTab } from "../../lib/vault/tree";
@@ -247,7 +248,9 @@
         {#if backlinkLinkedOpen}
           {#each sortedBacklinks as b (b.source_id + b.link_text)}
             <button class="bl-item" onclick={() => void onOpenNote(b.source_id)}>
-              <strong>{b.source_title}</strong>
+              <strong class="bl-title" use:marquee
+                ><span class="marquee-inner">{b.source_title}</span></strong
+              >
               <span class="bl-snippet">{b.snippet || b.link_text}</span>
             </button>
           {/each}
@@ -274,7 +277,9 @@
           {#each sortedUnlinked as u (u.source_id)}
             <div class="bl-item has-link">
               <button class="bl-main" onclick={() => void onOpenNote(u.source_id)}>
-                <strong>{u.source_title}</strong>
+                <strong class="bl-title" use:marquee
+                  ><span class="marquee-inner">{u.source_title}</span></strong
+                >
                 <span class="bl-snippet">{u.snippet || u.link_text}</span>
               </button>
               <button
@@ -318,7 +323,9 @@
                 >
                   <span class="outlink-icon">{o.is_attachment ? "📎" : "📄"}</span>
                   <div class="outlink-info">
-                    <strong>{o.target_title || o.target_raw}</strong>
+                    <strong class="bl-title" use:marquee
+                      ><span class="marquee-inner">{o.target_title || o.target_raw}</span></strong
+                    >
                     {#if o.link_text && o.link_text !== o.target_raw}
                       <span class="bl-snippet">Texto: {o.link_text}</span>
                     {/if}
@@ -328,7 +335,9 @@
                 <div class="bl-main outlink-main unresolved">
                   <span class="outlink-icon">⚠️</span>
                   <div class="outlink-info">
-                    <strong>{o.target_raw}</strong>
+                    <strong class="bl-title" use:marquee
+                      ><span class="marquee-inner">{o.target_raw}</span></strong
+                    >
                     <span class="badge ghost-badge">No existe</span>
                   </div>
                 </div>

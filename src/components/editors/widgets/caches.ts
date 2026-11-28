@@ -1,4 +1,4 @@
-import { StateEffect } from "@codemirror/state";
+import { StateEffect, StateField } from "@codemirror/state";
 import { call } from "../../../lib/ipc/commands";
 import { noteTitleSource } from "../../../lib/links/noteTitleSource";
 
@@ -9,6 +9,20 @@ export interface WikiCompletionEntry {
 }
 
 export const forceDecorationsEffect = StateEffect.define<null>();
+
+/** Rendered block (diagram, formula, table) whose raw source is open, until the cursor leaves it. */
+export const editBlockEffect = StateEffect.define<{ from: number; to: number } | null>();
+export const editingBlockField = StateField.define<{ from: number; to: number } | null>({
+  create: () => null,
+  update(value, tr) {
+    for (const e of tr.effects) if (e.is(editBlockEffect)) return e.value;
+    if (!value) return null;
+    // Text typed right before or after the block (Enter on its last line) stays outside it.
+    const next = { from: tr.changes.mapPos(value.from, 1), to: tr.changes.mapPos(value.to, -1) };
+    const head = tr.state.selection.main.head;
+    return head < next.from || head > next.to ? null : next;
+  },
+});
 
 export const embedExcerptCache = new Map<string, { text: string; muted: boolean; ts: number }>();
 /** Object URLs per attachment path; storing the promise shares loads still in flight. */

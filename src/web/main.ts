@@ -10,6 +10,7 @@ import "@fontsource/poppins/400-italic.css";
 import "@fontsource/cascadia-code/400.css";
 import "@fontsource/cascadia-code/700.css";
 import "../app.css";
+import "../lib/stores/editorColors.svelte";
 import "./web.css";
 import WebLogin from "./WebLogin.svelte";
 import { clearCache } from "./cache.ts";

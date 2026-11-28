@@ -241,14 +241,14 @@
           class="more-item"
           onclick={() => triggerAction({ kind: "rename-note", note: targetNote })}
         >
-          Renombrar nota
+          ✏️ Renombrar nota
         </button>
         <button
           type="button"
           class="more-item"
           onclick={() => triggerAction({ kind: "move-note", note: targetNote })}
         >
-          Mover de carpeta…
+          📂 Mover de carpeta…
         </button>
         <div class="menu-sep"></div>
         <button
@@ -256,7 +256,7 @@
           class="more-item danger-text"
           onclick={() => triggerAction({ kind: "delete-note", note: targetNote })}
         >
-          Eliminar nota
+          🗑️ Eliminar nota
         </button>
       {:else}
         {@const targetFolder = { path: treeContext.folderPath, name: treeContext.folderName }}
@@ -266,7 +266,7 @@
           class="more-item"
           onclick={() => triggerAction({ kind: "create-folder", parentFolder: targetFolder.path })}
         >
-          Nueva subcarpeta…
+          ➕ Nueva subcarpeta…
         </button>
         <button
           type="button"
@@ -278,7 +278,7 @@
               folderName: targetFolder.name,
             })}
         >
-          Renombrar carpeta
+          ✏️ Renombrar carpeta
         </button>
         <button
           type="button"
@@ -290,7 +290,7 @@
               folderName: targetFolder.name,
             })}
         >
-          Mover a otro Vault…
+          🗄️ Mover a otro Vault…
         </button>
         <div class="menu-sep"></div>
         <button
@@ -303,7 +303,7 @@
               folderName: targetFolder.name,
             })}
         >
-          Eliminar carpeta…
+          🗑️ Eliminar carpeta…
         </button>
       {/if}
     </div>

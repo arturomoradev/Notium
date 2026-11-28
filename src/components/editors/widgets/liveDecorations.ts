@@ -1,7 +1,9 @@
 import { EditorState, StateField } from "@codemirror/state";
 import { Decoration, type DecorationSet, EditorView } from "@codemirror/view";
 import type { MarkdownViewMode } from "../markdownEngine";
-import { forceDecorationsEffect } from "./caches";
+import { editBlockEffect, editingBlockField, forceDecorationsEffect } from "./caches";
+
+const PERSISTENT_LANGS = new Set(["mermaid", "math", "latex", "tex"]);
 import { isolateMarkdownFrontmatter } from "../markdownFormatting";
 import { BulletWidget, CheckboxWidget, NumberWidget } from "./listWidgets";
 import {
@@ -78,6 +80,9 @@ export function buildLiveDecorations(
   const head = state.selection.main.head;
   const cursorLine = state.doc.lineAt(head).number;
   const revealLine = mode === "reading" ? -1 : cursorLine;
+  // Diagrams, display formulas and tables stay rendered; only their edit button shows the source.
+  const editable = mode !== "reading";
+  const editing = state.field(editingBlockField, false) ?? null;
 
   // YAML frontmatter stays raw (its `---` fences are not horizontal rules).
   let firstLine = 1;
@@ -99,13 +104,16 @@ export function buildLiveDecorations(
       let last = i + 1;
       while (last <= doc.lines && !/^\s*```\s*$/.test(doc.line(last).text)) last++;
       if (last <= doc.lines) {
-        const cursorInside = mode !== "reading" && cursorLine >= i && cursorLine <= last;
+        const lang = (fenceOpen[2] ?? "").toLowerCase();
+        const persistent = PERSISTENT_LANGS.has(lang);
+        const cursorInside =
+          mode !== "reading" &&
+          (persistent ? editing?.from === start : cursorLine >= i && cursorLine <= last);
         if (cursorInside) {
           for (let row = i; row <= last; row++) {
             decos.push(Decoration.line({ class: "cm-code-line" }).range(doc.line(row).from));
           }
         } else {
-          const lang =(fenceOpen[2] ?? "").toLowerCase();
           const bodyLines: string[] = [];
           for (let row = i + 1; row < last; row++) bodyLines.push(doc.line(row).text);
           const body = bodyLines.join("\n");
@@ -113,14 +121,14 @@ export function buildLiveDecorations(
           if (lang === "math" || lang === "latex" || lang === "tex") {
             decos.push(
               Decoration.replace({
-                widget: new MathWidget(start, body, true),
+                widget: new MathWidget(start, body, true, blockTo, editable),
                 block: true,
               }).range(start, blockTo),
             );
           } else if (lang === "mermaid") {
             decos.push(
               Decoration.replace({
-                widget: new MermaidDiagramWidget(start, body),
+                widget: new MermaidDiagramWidget(start, body, blockTo, editable),
                 block: true,
               }).range(start, blockTo),
             );
@@ -144,13 +152,12 @@ export function buildLiveDecorations(
       let last = i + 1;
       while (last <= doc.lines && !/^\s*\$\$\s*$/.test(doc.line(last).text)) last++;
       if (last <= doc.lines) {
-        const cursorInside = mode !== "reading" && cursorLine >= i && cursorLine <= last;
-        if (!cursorInside) {
+        if (!(editable && editing?.from === start)) {
           const bodyLines: string[] = [];
           for (let row = i + 1; row < last; row++) bodyLines.push(doc.line(row).text);
           decos.push(
             Decoration.replace({
-              widget: new MathWidget(start, bodyLines.join("\n"), true),
+              widget: new MathWidget(start, bodyLines.join("\n"), true, doc.line(last).to, editable),
               block: true,
             }).range(start, doc.line(last).to),
           );
@@ -161,10 +168,10 @@ export function buildLiveDecorations(
     }
 
     const singleLineDisplayMath = /^\s*\$\$([^$\n]+)\$\$\s*$/.exec(text);
-    if (singleLineDisplayMath && !reveal) {
+    if (singleLineDisplayMath && !(editable && editing?.from === start)) {
       decos.push(
         Decoration.replace({
-          widget: new MathWidget(start, singleLineDisplayMath[1], true),
+          widget: new MathWidget(start, singleLineDisplayMath[1], true, line.to, editable),
           block: true,
         }).range(start, line.to),
       );
@@ -218,13 +225,12 @@ export function buildLiveDecorations(
           .startsWith("|")
       )
         last++;
-      const cursorInside = mode !== "reading" && cursorLine >= i && cursorLine <= last;
-      if (last > i && !cursorInside) {
+      if (last > i && !(editable && editing?.from === start)) {
         const rows: string[] = [];
         for (let row = i; row <= last; row++) rows.push(doc.line(row).text);
         decos.push(
           Decoration.replace({
-            widget: new MarkdownTableWidget(start, rows),
+            widget: new MarkdownTableWidget(start, doc.line(last).to, rows, editable),
             block: true,
           }).range(start, doc.line(last).to),
         );
@@ -456,12 +462,14 @@ export function makeLivePreviewField(
   getMode: () => MarkdownViewMode,
   onLinkActivate: (target: string) => void,
 ) {
-  return StateField.define<DecorationSet>({
+  const field = StateField.define<DecorationSet>({
     create(state) {
       return buildLiveDecorations(state, getMode(), onLinkActivate);
     },
     update(decos, tr) {
-      const modeChanged = tr.effects.some((e) => e.is(forceDecorationsEffect));
+      const modeChanged =
+        tr.effects.some((e) => e.is(forceDecorationsEffect) || e.is(editBlockEffect)) ||
+        tr.startState.field(editingBlockField, false) !== tr.state.field(editingBlockField, false);
       if (!tr.docChanged && !tr.selection && !modeChanged) {
         return decos;
       }
@@ -476,4 +484,5 @@ export function makeLivePreviewField(
     },
     provide: (f) => EditorView.decorations.from(f),
   });
+  return [editingBlockField, field];
 }

@@ -1,5 +1,6 @@
 <script lang="ts">
   import { call } from "../../lib/ipc/commands";
+  import { marquee } from "../../lib/marquee";
   import Icon from "../editors/Icon.svelte";
   import ResizeHandle from "../ResizeHandle.svelte";
   import {
@@ -582,7 +583,9 @@
                   size={15}
                 />
               </span>
-              <span class="tree-title">{folder.name}</span>
+              <span class="tree-title" use:marquee
+                ><span class="marquee-inner">{folder.name}</span></span
+              >
             </button>
           </div>
           {#if !collapsedFolders.includes(folder.path)}
@@ -607,7 +610,9 @@
             }}
           >
             <span class="tree-icon"><Icon name="file" size={15} /></span>
-            <span class="tree-title">{note.title}</span>
+            <span class="tree-title" use:marquee
+              ><span class="marquee-inner">{note.title}</span></span
+            >
           </button>
         {/each}
       {/snippet}
@@ -626,7 +631,9 @@
       <div class="tree search-results">
         {#each searchHits as hit (hit.note_id)}
           <button class="tree-note" onclick={() => void onOpenNote(hit.note_id)}>
-            <span class="tree-title">{hit.title}</span>
+            <span class="tree-title" use:marquee
+              ><span class="marquee-inner">{hit.title}</span></span
+            >
           </button>
         {/each}
         {#if searchQuery.trim() && searchHits.length === 0}
@@ -650,7 +657,7 @@
               >
                 <Icon name={isExpanded ? "chevron-down" : "chevron-right"} size={13} />
                 <span class="tree-tag">#</span>
-                <span class="tree-title">{tag}</span>
+                <span class="tree-title" use:marquee><span class="marquee-inner">{tag}</span></span>
                 <span class="badge md">{taggedNotes.length}</span>
               </button>
               <button
@@ -672,7 +679,9 @@
                     style="padding-left: 26px"
                     onclick={() => void onOpenNote(n.note_id)}
                   >
-                    <span class="tree-title">{n.title}</span>
+                    <span class="tree-title" use:marquee
+                      ><span class="marquee-inner">{n.title}</span></span
+                    >
                   </button>
                 {/each}
               </div>

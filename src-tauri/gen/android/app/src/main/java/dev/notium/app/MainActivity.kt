@@ -30,7 +30,13 @@ class MainActivity : TauriActivity() {
 
   private val createDocumentLauncher = registerForActivityResult(
     ActivityResultContracts.CreateDocument("application/json")
-  ) { uri ->
+  ) { uri -> writePendingExport(uri) }
+
+  private val createImageLauncher = registerForActivityResult(
+    ActivityResultContracts.CreateDocument("image/png")
+  ) { uri -> writePendingExport(uri) }
+
+  private fun writePendingExport(uri: android.net.Uri?) {
     val bytes = pendingExportBytes
     pendingExportBytes = null
     if (uri != null && bytes != null) {
@@ -67,6 +73,21 @@ class MainActivity : TauriActivity() {
       runOnUiThread {
         pendingExportBytes = content.toByteArray(Charsets.UTF_8)
         createDocumentLauncher.launch(filename)
+      }
+    }
+
+    /** Saves an exported diagram/formula image (base64 PNG) where the user picks. */
+    @JavascriptInterface
+    fun saveImageDocument(filename: String, base64: String) {
+      val bytes = try {
+        android.util.Base64.decode(base64, android.util.Base64.DEFAULT)
+      } catch (e: IllegalArgumentException) {
+        notifyExportResult(false, "Imagen no válida")
+        return
+      }
+      runOnUiThread {
+        pendingExportBytes = bytes
+        createImageLauncher.launch(filename)
       }
     }
 

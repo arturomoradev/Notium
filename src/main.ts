@@ -8,6 +8,8 @@ import "@fontsource/poppins/400-italic.css";
 import "@fontsource/cascadia-code/400.css";
 import "@fontsource/cascadia-code/700.css";
 import "./app.css";
+// After app.css: applies the user's editor colours and custom CSS on top of it.
+import "./lib/stores/editorColors.svelte";
 
 // In a plain browser during development there is no Tauri backend: load a fake
 // one so the UI can be previewed (see src/dev/mockBackend.ts).

@@ -735,6 +735,30 @@ body {
   white-space: nowrap;
 }
 
+/* Text that doesn't fit scrolls right to left, pauses, and starts over (see lib/marquee.ts). */
+.marquee {
+  text-overflow: clip;
+}
+.marquee > .marquee-inner {
+  display: inline-block;
+  animation: marquee var(--marquee-time, 6s) linear infinite;
+}
+@keyframes marquee {
+  0%,
+  20% {
+    transform: translateX(0);
+  }
+  80%,
+  100% {
+    transform: translateX(var(--marquee-dist, 0));
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .marquee > .marquee-inner {
+    animation: none;
+  }
+}
+
 .tree-tag {
   color: var(--accent);
   font-weight: 600;
@@ -1233,6 +1257,9 @@ textarea,
 .editor-engine .cm-editor {
   height: 100%;
   max-width: 100%;
+  /* --ed-*: colours set in Settings → Colores del editor (unset keeps the theme default). */
+  background: var(--ed-bg, transparent);
+  color: var(--ed-text, inherit);
 }
 
 .editor-engine .cm-editor .cm-cursor,
@@ -1284,7 +1311,7 @@ textarea,
 }
 
 .cm-wiki-link {
-  color: var(--accent-text);
+  color: var(--ed-link, var(--accent-text));
   cursor: pointer;
   text-decoration: underline;
   text-underline-offset: 2px;
@@ -1370,6 +1397,7 @@ textarea,
 }
 
 .cm-h1 {
+  color: var(--ed-h1, inherit);
   font-size: 1.618em;
   font-weight: 700;
   letter-spacing: -0.015em;
@@ -1377,39 +1405,46 @@ textarea,
   padding-top: 0.4em;
 }
 .cm-h2 {
+  color: var(--ed-h2, inherit);
   font-size: 1.462em;
   letter-spacing: -0.011em;
 }
 .cm-h3 {
+  color: var(--ed-h3, inherit);
   font-size: 1.318em;
   letter-spacing: -0.008em;
 }
 .cm-h4 {
+  color: var(--ed-h4, inherit);
   font-size: 1.188em;
   letter-spacing: -0.005em;
 }
 .cm-h5 {
+  color: var(--ed-h5, inherit);
   font-size: 1.076em;
 }
 .cm-h6 {
+  color: var(--ed-h6, inherit);
   font-size: 1em;
 }
 .cm-bold {
   font-weight: 600;
+  color: var(--ed-bold, inherit);
 }
 .cm-italic {
   font-style: italic;
+  color: var(--ed-italic, inherit);
 }
 .cm-inline-code {
   background: var(--code-bg);
-  color: var(--code-fg);
+  color: var(--ed-code, var(--code-fg));
   border-radius: 4px;
   padding: 1px 5px;
   font-family: var(--font-mono);
   font-size: 0.875em;
 }
 .cm-tag {
-  color: var(--accent-text);
+  color: var(--ed-tag, var(--accent-text));
   background: var(--tag-bg);
   border-radius: 2em;
   padding: 0.25em 0.65em;
@@ -1417,15 +1452,15 @@ textarea,
 }
 .cm-strike {
   text-decoration: line-through;
-  color: var(--muted);
+  color: var(--ed-strike, var(--muted));
 }
 .cm-highlight {
-  background: var(--highlight-bg);
+  background: var(--ed-highlight, var(--highlight-bg));
   border-radius: 4px;
 }
 .cm-bullet-marker,
 .cm-number-marker {
-  color: var(--faint);
+  color: var(--ed-marker, var(--faint));
   font-weight: 400;
   margin-right: 0.55em;
 }
@@ -1451,7 +1486,7 @@ textarea,
   font-weight: 600;
 }
 .cm-rendered-link {
-  color: var(--accent-text);
+  color: var(--ed-link, var(--accent-text));
   text-decoration: underline;
   cursor: pointer;
 }
@@ -1497,7 +1532,7 @@ textarea,
   cursor: pointer;
 }
 .cm-blockquote {
-  border-left: 2px solid var(--accent);
+  border-left: 2px solid var(--ed-quote, var(--accent));
   padding-left: 12px;
 }
 .cm-hr {
@@ -1508,8 +1543,6 @@ textarea,
 
 /* ---------- Advanced Live Preview blocks (Math, Callouts, Mermaid, Code) ---------- */
 .cm-math-inline {
-  font-family: "Cambria Math", "Latin Modern Math", "STIX Two Math", Georgia, serif;
-  font-style: italic;
   background: color-mix(in srgb, var(--accent) 10%, transparent);
   padding: 1px 6px;
   border-radius: 4px;
@@ -1517,8 +1550,6 @@ textarea,
 }
 
 .cm-math-block {
-  font-family: "Cambria Math", "Latin Modern Math", "STIX Two Math", Georgia, serif;
-  font-size: 1.15em;
   text-align: center;
   padding: 12px 16px;
   background: var(--panel);
@@ -1529,36 +1560,8 @@ textarea,
   overflow-x: auto;
   box-sizing: border-box;
 }
-
-.cm-math-frac {
-  display: inline-flex;
-  flex-direction: column;
-  vertical-align: middle;
-  text-align: center;
-  font-size: 0.85em;
-  margin: 0 2px;
-}
-
-.cm-math-num {
-  border-bottom: 1px solid currentColor;
-  padding: 0 3px;
-}
-
-.cm-math-den {
-  padding: 0 3px;
-}
-
-.cm-math-sqrt {
-  border-top: 1px solid currentColor;
-  padding-top: 1px;
-}
-
-.cm-math-text {
-  font-style: normal;
-  font-family:
-    system-ui,
-    -apple-system,
-    sans-serif;
+.cm-math-content .katex-display {
+  margin: 0;
 }
 
 .cm-callout {
@@ -1875,6 +1878,10 @@ textarea,
 .bl-item strong {
   display: block;
   font-size: 13px;
+}
+.bl-title {
+  overflow: hidden;
+  white-space: nowrap;
 }
 
 .bl-snippet {
@@ -3942,6 +3949,143 @@ button.primary:disabled {
 /* Spacing around live-preview blocks (see blockGap in blockWidgets.ts). */
 .cm-block-gap {
   padding: 8px 0;
+}
+
+/* ---------- Persistent diagrams, formulas and tables ---------- */
+.cm-viewable,
+.cm-table-block {
+  position: relative;
+}
+.cm-viewable {
+  cursor: zoom-in;
+}
+.cm-block-actions {
+  position: absolute;
+  right: 6px;
+  display: flex;
+  gap: 4px;
+  opacity: 0;
+  transition: opacity 0.12s;
+  cursor: default;
+}
+.cm-block-actions-top {
+  top: 6px;
+}
+.cm-block-actions-bottom {
+  bottom: 6px;
+}
+.cm-table-block > .cm-block-actions-bottom {
+  bottom: -14px;
+}
+.cm-viewable:hover > .cm-block-actions,
+.cm-table-block:hover > .cm-block-actions,
+.cm-block-actions:focus-within {
+  opacity: 1;
+}
+@media (hover: none) {
+  .cm-block-actions {
+    opacity: 0.75;
+  }
+}
+.cm-block-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--muted);
+  cursor: pointer;
+}
+.cm-block-action:hover {
+  color: var(--text);
+  border-color: var(--faint);
+}
+.cm-rendered-table .cm-cell-editable {
+  cursor: text;
+}
+.cm-rendered-table .cm-cell-editable:focus-within {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: -2px;
+}
+.cm-cell-input {
+  display: block;
+  width: 100%;
+  min-width: 4ch;
+  box-sizing: border-box;
+  padding: 0;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  line-height: inherit;
+  resize: none;
+  overflow: hidden;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.cm-lightbox {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  background: color-mix(in srgb, var(--bg) 88%, transparent);
+  touch-action: none;
+  cursor: grab;
+}
+.cm-lightbox:active {
+  cursor: grabbing;
+}
+.cm-lightbox-stage {
+  transform-origin: center;
+  padding: 24px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  user-select: none;
+}
+.cm-lightbox-stage > svg {
+  display: block;
+  width: 86vw;
+  height: 76vh;
+}
+.cm-lightbox-stage > .cm-math-content {
+  display: block;
+  font-size: 2.6em;
+  color: var(--text);
+}
+.cm-lightbox-bar {
+  position: absolute;
+  bottom: calc(16px + env(safe-area-inset-bottom));
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  cursor: default;
+}
+.cm-lightbox-bar .cm-block-action {
+  width: 32px;
+  height: 32px;
+}
+.cm-lightbox-zoom {
+  min-width: 48px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
 }
 
 /* ---------- Toolbar config ---------- */

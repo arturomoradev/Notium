@@ -8,9 +8,10 @@
   import AttachmentsModal from "./AttachmentsModal.svelte";
   import TrashModal from "./TrashModal.svelte";
   import ToolbarConfig from "./editors/ToolbarConfig.svelte";
+  import EditorColorsSettings from "./EditorColorsSettings.svelte";
   import type { ImageQuality, SettingsDto, SyncStatusDto } from "../lib/ipc/types";
 
-  type SettingsPage = "general" | "toolbar" | "sync" | "attachments" | "trash" | "snippets";
+  type SettingsPage = "general" | "colors" | "toolbar" | "sync" | "attachments" | "trash" | "snippets";
   type SettingsTab = "home" | SettingsPage;
   type SnippetSection = "shortcuts" | "callouts" | "markdown";
 
@@ -43,6 +44,12 @@
       icon: "settings",
       label: "General",
       description: "Editor, apariencia y mantenimiento del Vault",
+    },
+    {
+      id: "colors",
+      icon: "palette",
+      label: "Colores del editor",
+      description: "Colores de títulos, negrita, cursiva, fondo y CSS propio",
     },
     {
       id: "toolbar",
@@ -857,6 +864,8 @@
         </div>
       {:else if activeTab === "attachments"}
         <AttachmentsModal embedded={true} {onOpenNote} {onClose} />
+      {:else if activeTab === "colors"}
+        <EditorColorsSettings />
       {:else if activeTab === "toolbar"}
         <ToolbarConfig embedded={true} {onClose} />
       {:else if activeTab === "trash"}

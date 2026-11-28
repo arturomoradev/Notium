@@ -944,42 +944,42 @@
           {#if moreOpen}
             <div class="menu-popover">
               <button class="more-item" onclick={() => ((moreOpen = false), void renameNote())}
-                >Renombrar nota</button
+                >✏️ Renombrar nota</button
               >
               <button class="more-item" onclick={() => ((moreOpen = false), void moveNote())}
-                >Mover a carpeta</button
+                >📂 Mover a carpeta</button
               >
               <button class="more-item" onclick={() => ((moreOpen = false), void deleteNote())}
-                >Eliminar nota</button
+                >🗑️ Eliminar nota</button
               >
               <div class="menu-sep"></div>
               <button
                 class="more-item"
                 onclick={() => ((moreOpen = false), (panelOpen = !panelOpen))}
-                >{panelOpen ? "Ocultar backlinks" : "Mostrar backlinks"}</button
+                >{panelOpen ? "🔗 Ocultar backlinks" : "🔗 Mostrar backlinks"}</button
               >
               <button
                 class="more-item"
                 onclick={() => ((moreOpen = false), editorStore.toggleFullWidth())}
-                >{editorStore.fullWidth ? "Ancho de lectura" : "Ancho completo"}</button
+                >{editorStore.fullWidth ? "📖 Ancho de lectura" : "↔️ Ancho completo"}</button
               >
               <button class="more-item" onclick={() => ((moreOpen = false), toggleTheme())}
-                >{settingsStore.resolvedTheme === "light" ? "Tema oscuro" : "Tema claro"}</button
+                >{settingsStore.resolvedTheme === "light" ? "🌙 Tema oscuro" : "☀️ Tema claro"}</button
               >
               <button class="more-item" onclick={() => ((moreOpen = false), openSyncSettings())}
-                >Sincronización Cloud</button
+                >☁️ Sincronización Cloud</button
               >
               <button
                 class="more-item"
-                onclick={() => ((moreOpen = false), (attachmentsModalOpen = true))}>Adjuntos</button
+                onclick={() => ((moreOpen = false), (attachmentsModalOpen = true))}>📎 Adjuntos</button
               >
               <button class="more-item" onclick={() => ((moreOpen = false), (trashOpen = true))}
-                >Papelera</button
+                >🗑️ Papelera</button
               >
               <button
                 class="more-item"
                 onclick={() => ((moreOpen = false), (vaultModalOpen = true))}
-                >Gestionar Vaults</button
+                >🗄️ Gestionar Vaults</button
               >
               <button
                 class="more-item"
@@ -987,7 +987,7 @@
                   (moreOpen = false),
                   (settingsInitialTab = "general"),
                   (settingsOpen = true)
-                )}>Ajustes</button
+                )}>⚙️ Ajustes</button
               >
             </div>
           {/if}
