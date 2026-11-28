@@ -832,26 +832,16 @@ pub async fn vault_import_attachment(
     state: State<'_, AppState>,
     request: tauri::ipc::Request<'_>,
 ) -> Result<String, CommandError> {
-    let bytes: Vec<u8> = match request.body() {
-        tauri::ipc::InvokeBody::Raw(bytes) => bytes.clone(),
-        // Fallback transport (postMessage) delivers the payload as a JSON array.
-        tauri::ipc::InvokeBody::Json(value) => serde_json::from_value(value.clone())
-            .map_err(|_| CommandError::InvalidFormat("expected a binary request body".into()))?,
-    };
-    let filename = request
-        .headers()
-        .get("x-filename")
-        .and_then(|v| v.to_str().ok())
-        .map(|v| {
-            percent_encoding::percent_decode_str(v)
-                .decode_utf8_lossy()
-                .into_owned()
-        })
-        .unwrap_or_default();
+    let bytes = raw_body(&request)?;
+    let filename = header(&request, "x-filename");
     let arc = state.vault.clone();
     blocking(move || {
-        let guard = lock(&arc)?;
-        let h = guard.as_ref().ok_or(CommandError::VaultClosed)?;
+        let mut guard = lock(&arc)?;
+        let h = guard.as_mut().ok_or(CommandError::VaultClosed)?;
+        // The app compressed it on the way in (lib/compressImage.ts).
+        let _ = h
+            .sync
+            .mark_image_checked(&notium_core::hash::content_hash(&bytes));
         let raw_name = std::path::Path::new(&filename)
             .file_name()
             .and_then(|n| n.to_str())
@@ -882,6 +872,200 @@ pub async fn vault_import_attachment(
         Ok(rel)
     })
     .await
+}
+
+/// Bytes of a raw IPC request body (the postMessage fallback sends a JSON array).
+fn raw_body(request: &tauri::ipc::Request<'_>) -> Result<Vec<u8>, CommandError> {
+    match request.body() {
+        tauri::ipc::InvokeBody::Raw(bytes) => Ok(bytes.clone()),
+        tauri::ipc::InvokeBody::Json(value) => serde_json::from_value(value.clone())
+            .map_err(|_| CommandError::InvalidFormat("expected a binary request body".into())),
+    }
+}
+
+/// A percent-encoded request header (header values must be ASCII); empty when absent.
+fn header(request: &tauri::ipc::Request<'_>, name: &str) -> String {
+    request
+        .headers()
+        .get(name)
+        .and_then(|v| v.to_str().ok())
+        .map(|v| {
+            percent_encoding::percent_decode_str(v)
+                .decode_utf8_lossy()
+                .into_owned()
+        })
+        .unwrap_or_default()
+}
+
+/// Attachment images not compressed yet: copied into `attachments/` by hand or
+/// imported before compression existed. Sync uploads them once the frontend
+/// has compressed them (`attachment_replace`) or found nothing to gain
+/// (`attachment_mark_checked`).
+#[tauri::command]
+pub async fn attachments_to_compress(
+    state: State<'_, AppState>,
+) -> Result<Vec<String>, CommandError> {
+    let arc = state.vault.clone();
+    blocking(move || {
+        let guard = lock(&arc)?;
+        let h = guard.as_ref().ok_or(CommandError::VaultClosed)?;
+        // The index's hashes, not a re-read of every image: this runs on each refresh.
+        let indexed: Vec<(String, String)> = {
+            let conn = h.index.conn();
+            let mut stmt = conn
+                .prepare("SELECT path, content_hash FROM attachments WHERE tombstoned = 0")
+                .map_err(sql)?;
+            let rows = stmt
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+                .map_err(sql)?;
+            rows.collect::<Result<_, _>>().map_err(sql)?
+        };
+        let mut out = Vec::new();
+        for (path, hash) in indexed {
+            if crate::sync::is_compressible_image(&path)
+                && !h.sync.is_image_checked(&hash).map_err(sql)?
+            {
+                out.push(path);
+            }
+        }
+        Ok(out)
+    })
+    .await
+}
+
+/// Record that an attachment image needs no compression (it would not shrink,
+/// or the WebView cannot decode it).
+#[tauri::command]
+pub async fn attachment_mark_checked(
+    state: State<'_, AppState>,
+    path: String,
+) -> Result<(), CommandError> {
+    let arc = state.vault.clone();
+    blocking(move || {
+        let mut guard = lock(&arc)?;
+        let h = guard.as_mut().ok_or(CommandError::VaultClosed)?;
+        if !crate::sync::is_safe_attachment_rel_path(&path) {
+            return Err(CommandError::InvalidFormat(
+                "invalid attachment path".into(),
+            ));
+        }
+        let hash = notium_core::hash::content_hash(&h.vault.read(&path)?);
+        h.sync.mark_image_checked(&hash).map_err(sql)
+    })
+    .await
+}
+
+/// Replace an attachment image with its compressed bytes (raw body). `x-path`
+/// names the attachment and `x-ext` the new format's extension; a different
+/// extension renames the file and rewrites the notes' links to it. Returns the
+/// attachment's path afterwards.
+#[tauri::command]
+pub async fn attachment_replace(
+    state: State<'_, AppState>,
+    request: tauri::ipc::Request<'_>,
+) -> Result<String, CommandError> {
+    let bytes = raw_body(&request)?;
+    let old = header(&request, "x-path");
+    let ext: String = header(&request, "x-ext")
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .take(8)
+        .collect();
+    let arc = state.vault.clone();
+    blocking(move || {
+        let mut guard = lock(&arc)?;
+        let h = guard.as_mut().ok_or(CommandError::VaultClosed)?;
+        replace_attachment_impl(h, &old, &ext, &bytes)
+    })
+    .await
+}
+
+fn sql(e: impl std::fmt::Display) -> CommandError {
+    CommandError::Sql(e.to_string())
+}
+
+pub(crate) fn replace_attachment_impl(
+    h: &mut VaultHandle,
+    old: &str,
+    ext: &str,
+    bytes: &[u8],
+) -> Result<String, CommandError> {
+    if !crate::sync::is_safe_attachment_rel_path(old) || !h.vault.exists(old) || ext.is_empty() {
+        return Err(CommandError::InvalidFormat("invalid attachment".into()));
+    }
+    let (stem, old_ext) = old.rsplit_once('.').unwrap_or((old, ""));
+    let new_rel = if old_ext.eq_ignore_ascii_case(ext) {
+        old.to_string()
+    } else {
+        let mut candidate = format!("{stem}.{ext}");
+        let mut n = 1;
+        while h.vault.exists(&candidate) {
+            candidate = format!("{stem}-{n}.{ext}");
+            n += 1;
+        }
+        candidate
+    };
+    h.vault.write_atomic(&new_rel, bytes)?;
+    h.sync
+        .mark_image_checked(&notium_core::hash::content_hash(bytes))
+        .map_err(sql)?;
+    if new_rel != old {
+        rewrite_attachment_links(h, old, &new_rel)?;
+        h.vault.remove_file(old)?;
+    }
+    let atts = h.vault.scan_attachments()?;
+    let _ = h.index.reconcile_attachments(&atts);
+    Ok(new_rel)
+}
+
+/// Point the notes that link to attachment `old` at `new` (same folder), as
+/// ordinary saves so the change syncs. Links name the file by path or by name.
+fn rewrite_attachment_links(h: &mut VaultHandle, old: &str, new: &str) -> Result<(), CommandError> {
+    let old_name = old.rsplit('/').next().unwrap_or(old);
+    let new_name = new.rsplit('/').next().unwrap_or(new);
+    let links: Vec<(String, String)> = {
+        let conn = h.index.conn();
+        let mut stmt = conn
+            .prepare(
+                "SELECT DISTINCT source_id, target_raw FROM links
+                 WHERE is_attachment = 1 AND target_path = ?1",
+            )
+            .map_err(sql)?;
+        let rows = stmt
+            .query_map([old], |r| Ok((r.get(0)?, r.get(1)?)))
+            .map_err(sql)?;
+        rows.collect::<Result<_, _>>().map_err(sql)?
+    };
+    let mut by_note: std::collections::BTreeMap<String, Vec<String>> = Default::default();
+    for (note_id, raw) in links {
+        by_note.entry(note_id).or_default().push(raw);
+    }
+    for (note_id, raws) in by_note {
+        let Some(rec) = h.index.get_note(&note_id).map_err(sql)? else {
+            continue;
+        };
+        let text = String::from_utf8_lossy(&h.vault.read(&rec.path)?).into_owned();
+        let (_, body) = notium_core::frontmatter::split(&text);
+        let mut body = body.to_string();
+        for raw in raws {
+            let Some(prefix) = raw.strip_suffix(old_name) else {
+                continue;
+            };
+            let to = format!("{prefix}{new_name}");
+            // Only inside link syntax: `[[raw`, `(raw` and `(<raw`, not in prose.
+            for open in ["[[", "(", "<"] {
+                body = body.replace(&format!("{open}{raw}"), &format!("{open}{to}"));
+            }
+        }
+        let rev = h
+            .sync
+            .get_current(&note_id)
+            .map_err(sql)?
+            .map(|(r, _)| r)
+            .unwrap_or(0);
+        save_impl(h, &note_id, &body, rev)?;
+    }
+    Ok(())
 }
 
 /// Read an attachment. Returned as a raw IPC response (an `ArrayBuffer` in the
@@ -2268,6 +2452,45 @@ mod tests {
             read_impl(&h, &created.note.note_id),
             Err(CommandError::NotFound(_))
         ));
+    }
+
+    /// A hand-copied PNG replaced by its WebP: the file is renamed, both link
+    /// forms in the note follow it, prose does not, and sync may upload it.
+    #[test]
+    fn replacing_an_attachment_rewrites_its_links() {
+        let (_dir, mut h) = test_handle();
+        h.vault
+            .write_atomic("attachments/foto.png", b"png")
+            .unwrap();
+        let atts = h.vault.scan_attachments().unwrap();
+        h.index.reconcile_attachments(&atts).unwrap();
+        let n = create_impl(&mut h, "markdown", Some("N"), None).unwrap();
+        let body = "# N
+
+![[attachments/foto.png]]
+![x](attachments/foto.png)
+foto.png
+";
+        save_impl(&mut h, &n.note.note_id, body, 0).unwrap();
+        let hash = notium_core::hash::content_hash(b"png");
+        assert!(!h.sync.is_image_checked(&hash).unwrap());
+
+        let new = replace_attachment_impl(&mut h, "attachments/foto.png", "webp", b"webp").unwrap();
+        assert_eq!(new, "attachments/foto.webp");
+        assert!(!h.vault.exists("attachments/foto.png"));
+        let text = read_impl(&h, &n.note.note_id).unwrap().content;
+        assert!(text.contains("![[attachments/foto.webp]]"), "{text}");
+        assert!(text.contains("![x](attachments/foto.webp)"), "{text}");
+        assert!(
+            text.contains(
+                "
+foto.png
+"
+            ),
+            "prose was rewritten: {text}"
+        );
+        let webp = notium_core::hash::content_hash(b"webp");
+        assert!(h.sync.is_image_checked(&webp).unwrap());
     }
 
     #[test]

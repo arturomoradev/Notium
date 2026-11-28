@@ -60,6 +60,11 @@ pub struct Op {
     /// from older peers, which fall back to `base_rev`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_hash: Option<String>,
+    /// Hash of a content too big to travel inline: it is uploaded to the
+    /// server (`/sync/content`) and `content` stays empty on the wire. Only
+    /// set between push and pull; the journal keeps the content itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_ref: Option<String>,
 }
 
 impl Op {
@@ -124,8 +129,13 @@ pub enum ApplyOutcome {
     Noop,
 }
 
-/// Maximum size in bytes of an attachment binary stored in a Cloudflare D1 `BLOB` column.
-pub const MAX_D1_BLOB_BYTES: u64 = 900_000;
+/// Largest attachment synced (stored in R2 by the server).
+pub const MAX_BLOB_BYTES: u64 = 15_000_000;
+/// Largest note content synced.
+pub const MAX_NOTE_BYTES: usize = 5_000_000;
+/// Note contents above this travel through R2 (`Op::content_ref`) instead of
+/// inline in the op, which D1 caps at 2 MB and JSON inflates about 3.5×.
+pub const INLINE_CONTENT_MAX: usize = 1_000_000;
 
 /// Normalize a vault partition identifier (`[a-z0-9_-]{1,64}`), defaulting to `"default"`.
 pub fn normalize_vault_id(raw: &str) -> String {
@@ -195,6 +205,11 @@ CREATE TABLE IF NOT EXISTS synced_blobs (
   path TEXT NOT NULL,
   PRIMARY KEY (hash, path)
 );
+-- Attachment images already compressed by the app (or that came from another
+-- device, which compressed them): the rest wait for compression before upload.
+CREATE TABLE IF NOT EXISTS checked_images (
+  hash TEXT PRIMARY KEY
+);
 -- Every note content seen (local saves, remote ops, merges), by hash: merge
 -- bases are found by hash, and `stamp` orders concurrent versions.
 CREATE TABLE IF NOT EXISTS contents (
@@ -248,6 +263,11 @@ impl SyncDb {
             "ALTER TABLE contents ADD COLUMN seen_at INTEGER NOT NULL DEFAULT 0",
             [],
         );
+        // Attachments synced before compression existed count as compressed.
+        conn.execute(
+            "INSERT OR IGNORE INTO checked_images (hash) SELECT hash FROM synced_blobs",
+            [],
+        )?;
         // Rows from before `seen_at` start their retention now.
         conn.execute(
             "UPDATE contents SET seen_at = unixepoch() WHERE seen_at = 0",
@@ -542,6 +562,7 @@ impl SyncDb {
                 path: r.get(10)?,
                 purge: r.get::<_, i64>(11)? != 0,
                 base_hash: r.get(12)?,
+                content_ref: None,
             })
         })?;
         let mut ops = Vec::new();
@@ -630,6 +651,7 @@ impl SyncDb {
             "INSERT OR REPLACE INTO synced_blobs (hash, path) VALUES (?1, ?2)",
             params![hash, path],
         )?;
+        self.mark_image_checked(hash)?;
         Ok(())
     }
 
@@ -676,6 +698,39 @@ impl SyncDb {
         Ok(true)
     }
 
+    /// Every `(hash, path)` synced with the server.
+    pub fn synced_blobs(&self) -> rusqlite::Result<Vec<(String, String)>> {
+        self.conn
+            .prepare("SELECT hash, path FROM synced_blobs")?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect()
+    }
+
+    pub fn unmark_blob_synced(&mut self, hash: &str, path: &str) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "DELETE FROM synced_blobs WHERE hash = ?1 AND path = ?2",
+            params![hash, path],
+        )?;
+        Ok(())
+    }
+
+    /// Record that this attachment content needs no (more) compression.
+    pub fn mark_image_checked(&mut self, hash: &str) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO checked_images (hash) VALUES (?1)",
+            params![hash],
+        )?;
+        Ok(())
+    }
+
+    pub fn is_image_checked(&self, hash: &str) -> rusqlite::Result<bool> {
+        self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM checked_images WHERE hash = ?1)",
+            params![hash],
+            |r| r.get(0),
+        )
+    }
+
     pub fn clear_synced_blobs(&mut self) -> rusqlite::Result<()> {
         self.conn.execute("DELETE FROM synced_blobs", [])?;
         Ok(())
@@ -697,6 +752,7 @@ pub fn local_create_op(device_id: &str, note_id: &str, content: Vec<u8>, hlc: Hl
         path: None,
         purge: false,
         base_hash: None,
+        content_ref: None,
     }
 }
 
@@ -715,6 +771,7 @@ pub fn local_delete_op(device_id: &str, note_id: &str, current_rev: u64, hlc: Hl
         path: None,
         purge: false,
         base_hash: None,
+        content_ref: None,
     }
 }
 
@@ -748,6 +805,7 @@ pub fn local_update_op(
         path: None,
         purge: false,
         base_hash: None,
+        content_ref: None,
     }
 }
 

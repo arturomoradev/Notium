@@ -4,9 +4,9 @@ These guidelines apply permanently and automatically in all sessions on the `Not
 
 Machine-specific values (repo name, production URL, `<INSTALL_DIR>`, `<ANDROID_SDK>`, `<NDK_VERSION>`) live in the untracked `AGENTS.local.md`; read it before deploying.
 
-## 1. Automatic Deployment After Each Modification (MANDATORY)
+## 1. Deployment (only when the user asks)
 
-**Whenever you make a modification to the project code, once it is verified (section 3) and committed, you MUST ship it everywhere: GitHub, web (production), PC and Android.** If a step fails, stop and report it; do not skip it silently.
+**Do not build or deploy after each change.** Verify (section 3) and commit as usual, then stop. Build and ship only when the user explicitly asks for it, and only to the targets they name (GitHub, web, sync server, PC, Android); "deploy everything" means all of them. If a step fails, stop and report it; do not skip it silently.
 
 ### 1.1 GitHub
 

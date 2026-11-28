@@ -244,6 +244,7 @@ fn case_only_rename_is_applied() {
         path: Some("notes/markdown/plan.md".into()),
         purge: false,
         base_hash: None,
+        content_ref: None,
     };
     apply_pulled_ops(&mut h, &[op.clone()], "dev_local").unwrap();
     op.op_id = "op_r".into();
@@ -275,6 +276,7 @@ fn remote_nfd_path_is_stored_as_nfc() {
         path: Some("notes/markdown/Cafe\u{301}.md".into()),
         purge: false,
         base_hash: None,
+        content_ref: None,
     };
     apply_pulled_ops(&mut h, &[op], "dev_local").unwrap();
     assert_eq!(
@@ -368,6 +370,7 @@ fn cloud_note(id: &str, rev: u64, body: &str) -> Op {
         path: Some(format!("notes/markdown/{id}.md")),
         purge: false,
         base_hash: None,
+        content_ref: None,
     }
 }
 
@@ -519,4 +522,119 @@ fn op_that_fails_to_apply_is_retried() {
         text.contains("cambiada"),
         "the remote edit was lost:\n{text}"
     );
+}
+
+// --- R2: notes over INLINE_CONTENT_MAX travel by reference, both ways ---
+#[test]
+fn large_note_travels_through_content_endpoint() {
+    let stored: Arc<Mutex<Vec<u8>>> = Default::default();
+    let pushed: Arc<Mutex<Vec<Op>>> = Default::default();
+    let remote = cloud_note("big", 0, &"r".repeat(1_200_000));
+    let remote_body = remote.content.clone().unwrap();
+    let remote_hash = notium_core::hash::content_hash(&remote_body);
+    let expected = remote_body.clone();
+    let (s2, p2) = (stored.clone(), pushed.clone());
+    let url = mock_server(move |req| {
+        if req.line.starts_with("PUT /sync/content/") {
+            *s2.lock().unwrap() = req.body.clone();
+            (201, "{}".into())
+        } else if req.line.starts_with("POST /sync/push") {
+            let push: PushRequest = serde_json::from_slice(&req.body).unwrap();
+            p2.lock().unwrap().extend(push.ops);
+            (200, accept_all(req))
+        } else if req.line.starts_with("GET /sync/content/big/") {
+            (200, String::from_utf8(remote_body.clone()).unwrap())
+        } else {
+            let mut op = cloud_note("big", 0, "");
+            op.content = None;
+            op.content_ref = Some(remote_hash.clone());
+            (200, pull_json("s:1", &[op], serde_json::json!([])))
+        }
+    });
+    let (d, mut h) = device();
+    let n = crate::commands::create_impl(&mut h, "markdown", Some("Grande"), None).unwrap();
+    let body = format!("# Grande\n\n{}", "x".repeat(1_100_000));
+    crate::commands::save_impl(&mut h, &n.note.note_id, &body, 0).unwrap();
+    let (shared, root) = shared(&d, h);
+    run_sync_cycle(&shared, &root, &cfg_for(url)).unwrap();
+
+    let ops = pushed.lock().unwrap();
+    let big = ops
+        .iter()
+        .find(|o| o.content_ref.is_some())
+        .expect("no op by reference");
+    assert!(big.content.is_none(), "the large content also went inline");
+    let up = stored.lock().unwrap();
+    assert_eq!(
+        big.content_ref.as_deref(),
+        Some(&*notium_core::hash::content_hash(&up))
+    );
+    assert!(ops
+        .iter()
+        .all(|o| o.content.as_ref().map_or(0, Vec::len) <= INLINE_CONTENT_MAX));
+
+    let g = shared.lock().unwrap();
+    let h = g.as_ref().unwrap();
+    let rec = h
+        .index
+        .get_note("big")
+        .unwrap()
+        .expect("remote large note missing");
+    assert_eq!(h.vault.read(&rec.path).unwrap(), expected);
+}
+
+// --- Attachment deletes reach the server, and the server's reach this device ---
+#[test]
+fn attachment_deletes_sync_both_ways() {
+    let deleted: Arc<Mutex<Vec<String>>> = Default::default();
+    let d2 = deleted.clone();
+    let theirs = notium_core::hash::content_hash(b"theirs");
+    let theirs2 = theirs.clone();
+    let url = mock_server(move |req| {
+        if req.line.starts_with("DELETE /sync/blob/") {
+            d2.lock().unwrap().push(req.line.clone());
+            (200, "{}".into())
+        } else if req.line.starts_with("POST /sync/push") {
+            (200, accept_all(req))
+        } else {
+            let blobs = serde_json::json!([
+                { "hash": theirs2, "path": "attachments/b.png", "deleted": true }
+            ]);
+            (200, pull_json("s:1", &[], blobs))
+        }
+    });
+    let (d, mut h) = device();
+    let mine = notium_core::hash::content_hash(b"mine");
+    h.sync.mark_blob_synced(&mine, "attachments/a.png").unwrap();
+    h.vault
+        .write_atomic("attachments/b.png", b"theirs")
+        .unwrap();
+    h.sync
+        .mark_blob_synced(&theirs, "attachments/b.png")
+        .unwrap();
+    h.vault
+        .write_atomic("attachments/keep.png", b"keep")
+        .unwrap();
+    let (shared, root) = shared(&d, h);
+    run_sync_cycle(&shared, &root, &cfg_for(url)).unwrap();
+
+    let sent = deleted.lock().unwrap();
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    assert!(
+        sent[0].contains(&mine) && sent[0].contains("a.png"),
+        "{sent:?}"
+    );
+    let g = shared.lock().unwrap();
+    let h = g.as_ref().unwrap();
+    assert!(
+        !h.vault.exists("attachments/b.png"),
+        "the remote delete was not applied"
+    );
+    assert!(h.vault.exists("attachments/keep.png"));
+    assert!(h
+        .sync
+        .synced_blobs()
+        .unwrap()
+        .iter()
+        .all(|(_, p)| p != "attachments/a.png"));
 }

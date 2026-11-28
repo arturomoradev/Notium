@@ -33,7 +33,8 @@ Este documento sirve como referencia viva para todos los agentes y desarrollador
      - El `device_id` queda ligado a la instalación y la carpeta: un vault copiado obtiene uno nuevo. Ya no se puede editar en Ajustes.
      - Nombres en NFC (2026-11-25): la app normaliza con `icu_normalizer` (ya venía con Tauri) los títulos, las carpetas, el escaneo del vault (renombra en disco los nombres NFD) y las rutas recibidas; la web usa `String.normalize("NFC")`.
      - Poda de `sync.db` (2026-11-25), una vez al día al abrir el vault: borra los contenidos que no se han visto en 30 días (salvo el actual de cada nota), los cuerpos de las ops ya subidas con esa antigüedad y las copias por revisión heredadas. Una edición offline de más de 30 días acaba en copia de conflicto en lugar de fusionarse. `applied_ops` no se poda: al cambiar de servidor o de vault se vuelve a descargar todo, y es lo que evita reaplicar ops viejas.
-     - Pendiente: ops rechazadas por tamaño (motivo devuelto por el servidor, apartarlas y avisar en el editor).
+     - Archivos grandes en R2 (2026-11-27, bucket `notium-attachments`): adjuntos de hasta 15 MB (antes 900 KB, y los mayores no se sincronizaban sin avisar) y notas de hasta 5 MB. Las notas de más de 1 MB se suben a `/sync/content/<nota>/<hash>` antes de la op, que solo lleva `content_ref`; el servidor rechaza la op si el contenido no está en R2 y lo borra al purgar la nota. Las imágenes copiadas a mano en `attachments/` se comprimen (WebP a la resolución de Ajustes, sustituyendo el original y reescribiendo los enlaces) antes de subirse.
+     - Borrado de adjuntos sincronizado (2026-11-27): un adjunto ya sincronizado que desaparece del vault (desde la app o a mano) se borra en el servidor (`DELETE /sync/blob`), que lo quita de R2 si ninguna otra ruta usa esos bytes y lo anuncia como `deleted` en `/sync/pull`; los demás dispositivos y la web lo borran también. Si falta la carpeta `attachments/` entera no se borra nada.
 2. **UX de Enlaces No Resueltos y Reparación de Enlaces (Link Repair — IMPLEMENTADO):**
    - Listar enlaces salientes (`note_get_outlinks`) y enlaces no resueltos (fantasmas) en el panel lateral de Enlaces y Backlinks, con botón `+ Crear nota` para crearlas instantáneamente.
    - Asistente de actualización de enlaces (`note_check_link_references`, `note_repair_links`): al renombrar una nota, detecta si otras notas la enlazan y ofrece actualizar automáticamente el texto de los `[[Enlaces]]` en todos los archivos Markdown o mantener la resolución por alias.
@@ -92,6 +93,8 @@ Este documento sirve como referencia viva para todos los agentes y desarrollador
 ---
 
 ## 3. Mejoras de UX y Arquitectura (Apartado B — Completado)
+
+0. **[x] Paneles laterales redimensionables (2026-11-28, PC y web):** el panel de archivos y el de enlaces se ensanchan o estrechan arrastrando su borde interior (200–600 px; doble clic vuelve a 280 px). El ancho se recuerda por dispositivo (`localStorage`). En el diseño compacto (móvil o ventana estrecha) no hay tirador y los cajones no cambian.
 
 1. **[x] Reemplazar `window.prompt` y `window.confirm` restantes por modales propios de la UI:**
    - Unificar todos los diálogos de entrada y confirmación bajo el diseño visual de Notium:

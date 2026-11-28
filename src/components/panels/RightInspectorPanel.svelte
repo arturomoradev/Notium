@@ -1,6 +1,7 @@
 <script lang="ts">
   import { call } from "../../lib/ipc/commands";
   import Icon from "../editors/Icon.svelte";
+  import ResizeHandle from "../ResizeHandle.svelte";
   import { folderOf, formatError, type ConflictItem, type PanelTab } from "../../lib/vault/tree";
   import type { BacklinkDto, OutlinkDto } from "../../lib/ipc/types";
   import type { Stats } from "../../lib/plainText";
@@ -207,6 +208,7 @@
 />
 
 <aside class="panel" class:open={panelOpen}>
+  {#if isDesktop}<ResizeHandle panel="panel" />{/if}
   <div class="panel-head">
     <span class="panel-title">
       <Icon name={panelTab === "conflicts" ? "alert" : "link"} size={15} />

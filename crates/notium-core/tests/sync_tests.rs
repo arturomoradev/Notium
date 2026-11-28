@@ -272,6 +272,7 @@ fn s8_delete_vs_update_keeps_file() {
         path: None,
         purge: false,
         base_hash: None,
+        content_ref: None,
     };
     let out = apply_remote(&mut db, &vault, &op, "markdown", "notes/markdown/A.md").unwrap();
     assert_eq!(out, ApplyOutcome::DeleteConflict);
@@ -301,6 +302,7 @@ fn s9_no_resurrection_from_stale_push() {
         path: None,
         purge: false,
         base_hash: None,
+        content_ref: None,
     };
     assert_eq!(
         apply_remote(&mut db, &vault, &del, "markdown", "notes/markdown/A.md").unwrap(),

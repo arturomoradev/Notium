@@ -20,7 +20,7 @@
   import { updateViewport } from "./lib/mobile/viewport";
   import { DEMO_GUIDE_TITLE, ensureDemoNotes } from "./lib/demoNotes";
   import { settingsStore } from "./lib/stores/settings.svelte";
-  import { compressImage } from "./lib/compressImage";
+  import { compressImage, compressPendingAttachments } from "./lib/compressImage";
   import { editorStore, type EditorKind, type ViewMode } from "./lib/stores/editor.svelte";
   import { hideSplash } from "./lib/splash";
   import {
@@ -426,6 +426,10 @@
     notes = noteList;
     settingsStore.set(loadedSettings);
     folders = folderList;
+    // Renamed images rewrite their notes' links: show the new text.
+    void compressPendingAttachments(loadedSettings.image_quality).then(
+      (changed) => void (changed && onVaultChanged([])),
+    );
   }
 
   async function loadBacklinks(id: string, title: string): Promise<void> {
@@ -764,6 +768,8 @@
 
 <div
   class="app"
+  style:--sidebar-width={isDesktop ? `${layout.panelWidths.sidebar}px` : null}
+  style:--panel-width={isDesktop ? `${layout.panelWidths.panel}px` : null}
   class:is-desktop={isDesktop}
   class:sidebar-closed={!sidebarOpen}
   class:panel-open={panelOpen}

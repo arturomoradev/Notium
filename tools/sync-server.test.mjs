@@ -54,7 +54,38 @@ function fakeD1() {
   return d1;
 }
 
-const env = { DB: fakeD1(), ALLOW_UNAUTHENTICATED: "true" };
+/** The subset of the R2 API the worker uses, kept in a Map. */
+function fakeR2() {
+  const objects = new Map();
+  const obj = (key) => {
+    const data = objects.get(key);
+    return (
+      data && { key, size: data.byteLength, body: data.slice(), arrayBuffer: async () => data }
+    );
+  };
+  return {
+    objects,
+    async put(key, value) {
+      objects.set(
+        key,
+        new Uint8Array(
+          value instanceof ArrayBuffer ? value : await new Response(value).arrayBuffer(),
+        ),
+      );
+    },
+    get: async (key) => obj(key) ?? null,
+    head: async (key) => obj(key) ?? null,
+    async delete(keys) {
+      for (const k of [keys].flat()) objects.delete(k);
+    },
+    list: async ({ prefix = "" } = {}) => ({
+      objects: [...objects.keys()].filter((k) => k.startsWith(prefix)).map(obj),
+      truncated: false,
+    }),
+  };
+}
+
+const env = { DB: fakeD1(), BUCKET: fakeR2(), ALLOW_UNAUTHENTICATED: "true" };
 const realNow = Date.now;
 const at = (ms) => (Date.now = () => ms);
 
@@ -245,4 +276,103 @@ test("after a purge, later ops are still delivered", async () => {
   );
   const all = await pullAll("purge");
   assert.ok(!all.ops.some((o) => o.note_id === "np" && o.content), "purged content still served");
+});
+
+const send = (path, method = "GET", body) =>
+  worker.fetch(new Request(`https://sync.test${path}`, { method, body }), env);
+
+// R2: attachments up to 15 MB, beyond D1's 2 MB per value.
+test("a large attachment is stored in R2 and downloaded back", async () => {
+  const file = new Uint8Array(3_000_000).fill(7);
+  const up = await send("/sync/blob/big1?vault_id=r2&path=attachments%2Ffoto.jpg", "PUT", file);
+  assert.equal(up.status, 201);
+  const page = await pull("r2");
+  assert.deepEqual(
+    page.blobs.map((b) => [b.path, b.size]),
+    [["attachments/foto.jpg", 3_000_000]],
+  );
+  const down = await send("/sync/blob/big1?vault_id=r2");
+  assert.equal(down.status, 200);
+  assert.equal((await down.arrayBuffer()).byteLength, 3_000_000);
+  const tooBig = await send(
+    "/sync/blob/big2?vault_id=r2&path=attachments%2Fx.pdf",
+    "PUT",
+    new Uint8Array(15_000_001),
+  );
+  assert.equal(tooBig.status, 413);
+});
+
+test("an attachment stored in D1 before R2 is still served", async () => {
+  await pull("legacyblob");
+  await env.DB.prepare(
+    `INSERT INTO blobs (vault_id, hash, path, size, data, ts, seq) VALUES ('legacyblob', 'old1', 'attachments/a.png', 3, ?, 0, 99999)`,
+  )
+    .bind(new Uint8Array([1, 2, 3]))
+    .run();
+  const down = await send("/sync/blob/old1?vault_id=legacyblob");
+  assert.deepEqual(new Uint8Array(await down.arrayBuffer()), new Uint8Array([1, 2, 3]));
+});
+
+// Notes over D1's limit travel through R2: the op names the content.
+test("a large note goes through R2 and its op carries only the reference", async () => {
+  const text = new Uint8Array(3_000_000).fill(65);
+  assert.equal((await send("/sync/content/nbig/h3?vault_id=bign", "PUT", text)).status, 201);
+  const res = await push("bign", [
+    op({ op_id: "big", note_id: "nbig", content: null, content_ref: "h3" }),
+    op({ op_id: "missing", note_id: "nbig", content: null, content_ref: "nothere" }),
+  ]);
+  assert.deepEqual(res.body.accepted_op_ids, ["big"]);
+  assert.deepEqual(res.body.rejected_op_ids, ["missing"], "an op whose content never reached R2");
+  const { ops } = await pullAll("bign");
+  assert.deepEqual(
+    ops.map((o) => [o.op_id, o.content, o.content_ref]),
+    [["big", null, "h3"]],
+  );
+  const got = await send("/sync/content/nbig/h3?vault_id=bign");
+  assert.equal((await got.arrayBuffer()).byteLength, 3_000_000);
+  assert.equal(
+    (await send("/sync/content/nbig/h3?vault_id=bign", "PUT", new Uint8Array(5_000_001))).status,
+    413,
+  );
+  assert.equal((await send("/sync/content/..%2Fx/h3?vault_id=bign")).status, 400);
+
+  await push("bign", [
+    op({ op_id: "gone", note_id: "nbig", kind: "delete", content: null, purge: true }),
+  ]);
+  assert.equal(
+    (await send("/sync/content/nbig/h3?vault_id=bign")).status,
+    404,
+    "purge leaves R2 content",
+  );
+  const after = await pullAll("bign");
+  assert.ok(!after.ops.some((o) => o.content_ref), "purged op still names its content");
+});
+
+// Deleting an attachment on a device removes it from R2 and tells the others.
+test("a deleted attachment leaves R2 and is announced as deleted", async () => {
+  await send("/sync/blob/d1?vault_id=del&path=attachments%2Fa.png", "PUT", new Uint8Array([1]));
+  await send("/sync/blob/d1?vault_id=del&path=attachments%2Fcopia.png", "PUT", new Uint8Array([1]));
+  const { cursor } = await pullAll("del");
+  const first = await send("/sync/blob/d1?vault_id=del&path=attachments%2Fa.png", "DELETE");
+  assert.equal(first.status, 200);
+  assert.ok(env.BUCKET.objects.has("att/del/d1"), "still used by attachments/copia.png");
+  await send("/sync/blob/d1?vault_id=del&path=attachments%2Fcopia.png", "DELETE");
+  assert.ok(!env.BUCKET.objects.has("att/del/d1"), "file left in R2");
+  assert.equal((await send("/sync/blob/d1?vault_id=del")).status, 404);
+
+  const page = await pull("del", cursor);
+  assert.deepEqual(
+    page.blobs.map((b) => [b.path, b.deleted]),
+    [
+      ["attachments/a.png", true],
+      ["attachments/copia.png", true],
+    ],
+  );
+  // Added again later: announced as a live attachment.
+  await send("/sync/blob/d1?vault_id=del&path=attachments%2Fa.png", "PUT", new Uint8Array([1]));
+  const again = await pull("del", page.cursor);
+  assert.deepEqual(
+    again.blobs.map((b) => [b.path, b.deleted]),
+    [["attachments/a.png", undefined]],
+  );
 });

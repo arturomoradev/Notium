@@ -27,6 +27,8 @@ export interface WireOp {
   purge?: boolean;
   /** Hash of the content the op was built on (merge base for devices). */
   base_hash?: string;
+  /** Content too big to travel inline: uploaded to `/sync/content`, `content` empty. */
+  content_ref?: string;
 }
 
 export interface WebNote {

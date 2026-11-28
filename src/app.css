@@ -420,8 +420,8 @@ body {
 }
 
 .sidebar {
-  width: 280px;
-  flex: 0 0 280px;
+  width: var(--sidebar-width, 280px);
+  flex: 0 0 var(--sidebar-width, 280px);
   background: var(--panel);
   border-right: 1px solid var(--border);
   display: flex;
@@ -438,13 +438,14 @@ body {
 
 :root:not(.is-compact) .sidebar,
 :root:not(.is-compact) .panel {
+  position: relative;
   transition:
     margin var(--drawer-duration) var(--drawer-ease),
     visibility 0s;
 }
 
 :root:not(.is-compact) .app.sidebar-closed .sidebar {
-  margin-left: -280px;
+  margin-left: calc(-1 * var(--sidebar-width, 280px));
   visibility: hidden;
   transition:
     margin var(--drawer-duration) var(--drawer-ease),
@@ -1762,8 +1763,8 @@ textarea,
 
 /* ---------- Backlinks panel ---------- */
 .panel {
-  width: 280px;
-  flex: 0 0 280px;
+  width: var(--panel-width, 280px);
+  flex: 0 0 var(--panel-width, 280px);
   background: var(--panel);
   border-left: 1px solid var(--border);
   display: flex;
@@ -1772,7 +1773,7 @@ textarea,
 }
 
 :root:not(.is-compact) .app:not(.panel-open) .panel {
-  margin-right: -280px;
+  margin-right: calc(-1 * var(--panel-width, 280px));
   visibility: hidden;
   transition:
     margin var(--drawer-duration) var(--drawer-ease),
@@ -4027,4 +4028,43 @@ button.primary:disabled {
 .tb-handle {
   cursor: grab;
   touch-action: none;
+}
+
+/* ---------- Side panel resize handles (desktop layout) ---------- */
+/* Only the cursor tells, over the panel's border line. The handle draws that
+   line itself (the panels clip children to inside their border), a few px wide
+   so the 1 px line is easy to hit. */
+:root:not(.is-compact) .sidebar {
+  border-right: none;
+}
+
+:root:not(.is-compact) .panel {
+  border-left: none;
+}
+
+.resize-handle {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 5px;
+  z-index: 5;
+  cursor: ew-resize;
+  touch-action: none;
+}
+
+/* Inside the edge: the panels clip their overflow. */
+.resize-handle.resize-sidebar {
+  right: 0;
+  border-right: 1px solid var(--border);
+}
+
+.resize-handle.resize-panel {
+  left: 0;
+  border-left: 1px solid var(--border);
+}
+
+/* While dragging: no text selection, the resize cursor everywhere. */
+body.panel-resizing {
+  cursor: ew-resize;
+  user-select: none;
 }

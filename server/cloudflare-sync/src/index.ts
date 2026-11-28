@@ -1,5 +1,7 @@
 interface Env {
   DB: D1Database;
+  /** R2 bucket `notium-attachments`: attachment files and note contents too big for D1. */
+  BUCKET: R2Bucket;
   /** Bearer token secret (`wrangler secret put AUTH_TOKEN`). Required. */
   AUTH_TOKEN?: string;
   /** Set to "true" only for local development to run without a token. */
@@ -39,12 +41,32 @@ async function authorize(request: Request, env: Env): Promise<Response | null> {
   return (await timingSafeEqual(token, env.AUTH_TOKEN)) ? null : jsonError(401, "No autorizado");
 }
 
-const MAX_D1_BLOB_BYTES = 900_000;
+/** Largest attachment (stored in R2; same limit as notium-core `MAX_BLOB_BYTES`). */
+const MAX_BLOB_BYTES = 15_000_000;
+/** Largest note content uploaded to R2 (`/sync/content`; notium-core `MAX_NOTE_BYTES`). */
+const MAX_NOTE_BYTES = 5_000_000;
 /**
- * Largest note content accepted in one op. D1 refuses a value over 2 MB, and
+ * Largest note content accepted inline in one op. D1 refuses a value over 2 MB, and
  * one such op used to fail its whole push batch, blocking the device's sync.
+ * Bigger notes travel through R2 and the op names them in `content_ref`.
  */
 const MAX_OP_CONTENT_BYTES = 1_900_000;
+
+/** Hashes and note ids end up in R2 keys: no `/` or `..`. */
+const KEY_PART_RE = /^[A-Za-z0-9_-]{1,128}$/;
+const attachmentKey = (vaultId: string, hash: string) => `att/${vaultId}/${hash}`;
+const noteKey = (vaultId: string, noteId: string, hash: string) =>
+  `note/${vaultId}/${noteId}/${hash}`;
+
+/** Delete every R2 object under `prefix` (a purged note's contents). */
+async function deletePrefix(bucket: R2Bucket, prefix: string): Promise<void> {
+  let cursor: string | undefined;
+  do {
+    const list = await bucket.list({ prefix, cursor });
+    if (list.objects.length) await bucket.delete(list.objects.map((o) => o.key));
+    cursor = list.truncated ? list.cursor : undefined;
+  } while (cursor);
+}
 
 const VAULT_ID_RE = /^[a-z0-9_-]{1,64}$/;
 
@@ -105,11 +127,16 @@ async function ensureSchema(db: D1Database): Promise<void> {
     ["journal", "purge INTEGER NOT NULL DEFAULT 0"],
     // Hash del contenido sobre el que se hizo la op (base del merge).
     ["journal", "base_hash TEXT"],
+    // Hash del contenido guardado en R2 (notas de más de MAX_OP_CONTENT_BYTES).
+    ["journal", "content_ref TEXT"],
     // Orden de llegada: el cursor de /sync/pull. `ts` lo fija el inicio de la
     // petición, así que un push lento que confirma tarde quedaba detrás de un
     // cursor ya entregado y sus ops no llegaban nunca.
     ["journal", "seq INTEGER"],
     ["blobs", "seq INTEGER"],
+    // Adjunto borrado: la fila se queda (con un seq nuevo) para que los demás
+    // dispositivos se enteren y lo borren también.
+    ["blobs", "deleted INTEGER NOT NULL DEFAULT 0"],
   ]) {
     try {
       await db.prepare(`ALTER TABLE ${table} ADD COLUMN ${col}`).run();
@@ -143,8 +170,9 @@ const TRASH_RETENTION_SECS = 30 * 24 * 60 * 60;
 function eraseNoteHistory(db: D1Database, vaultId: string, noteId: string): D1PreparedStatement {
   return db
     .prepare(
-      `UPDATE journal SET content = NULL, path = NULL
-       WHERE vault_id = ? AND note_id = ? AND lower(kind) != 'delete' AND content IS NOT NULL`,
+      `UPDATE journal SET content = NULL, path = NULL, content_ref = NULL
+       WHERE vault_id = ? AND note_id = ? AND lower(kind) != 'delete'
+         AND (content IS NOT NULL OR content_ref IS NOT NULL)`,
     )
     .bind(vaultId, noteId);
 }
@@ -155,21 +183,28 @@ function eraseNoteHistory(db: D1Database, vaultId: string, noteId: string): D1Pr
  * server's clock decides (`ts`, ms), not the device's HLC, which a phone with
  * a wrong date could set decades in the past.
  */
-async function purgeExpiredTrash(db: D1Database, nowSecs: number): Promise<number> {
-  const { meta } = await db
-    .prepare(
-      `UPDATE journal SET content = NULL, path = NULL
-       WHERE lower(kind) != 'delete' AND content IS NOT NULL
-         AND (vault_id, note_id) IN (
+async function purgeExpiredTrash(env: Env, nowSecs: number): Promise<number> {
+  const expired = `(vault_id, note_id) IN (
            SELECT j.vault_id, j.note_id
            FROM journal j
            JOIN (SELECT vault_id, note_id, MAX(seq) AS seq FROM journal GROUP BY vault_id, note_id) last
              ON j.vault_id = last.vault_id AND j.note_id = last.note_id AND j.seq = last.seq
            WHERE lower(j.kind) = 'delete' AND j.ts < ?
-         )`,
-    )
-    .bind((nowSecs - TRASH_RETENTION_SECS) * 1000)
+         )`;
+  const cutoff = (nowSecs - TRASH_RETENTION_SECS) * 1000;
+  const { results: inR2 } = await env.DB.prepare(
+    `SELECT DISTINCT vault_id, note_id FROM journal WHERE content_ref IS NOT NULL AND ${expired}`,
+  )
+    .bind(cutoff)
+    .all<{ vault_id: string; note_id: string }>();
+  const { meta } = await env.DB.prepare(
+    `UPDATE journal SET content = NULL, path = NULL, content_ref = NULL
+       WHERE lower(kind) != 'delete' AND (content IS NOT NULL OR content_ref IS NOT NULL)
+         AND ${expired}`,
+  )
+    .bind(cutoff)
     .run();
+  for (const n of inR2) await deletePrefix(env.BUCKET, `note/${n.vault_id}/${n.note_id}/`);
   return meta.changes ?? 0;
 }
 
@@ -186,8 +221,8 @@ const NEXT_SEQ = `(SELECT COALESCE(MAX(s), 0) + 1 FROM (SELECT MAX(seq) AS s FRO
 function insertOp(db: D1Database, vaultId: string, op: any, serverTs: number): D1PreparedStatement {
   return db
     .prepare(
-      `INSERT OR IGNORE INTO journal (vault_id, op_id, device_id, note_id, kind, base_rev, new_rev, content, hlc_ts, hlc_cnt, ts, path, purge, base_hash, seq)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ${NEXT_SEQ})`,
+      `INSERT OR IGNORE INTO journal (vault_id, op_id, device_id, note_id, kind, base_rev, new_rev, content, hlc_ts, hlc_cnt, ts, path, purge, base_hash, content_ref, seq)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ${NEXT_SEQ})`,
     )
     .bind(
       vaultId,
@@ -204,6 +239,7 @@ function insertOp(db: D1Database, vaultId: string, op: any, serverTs: number): D
       typeof op.path === "string" ? op.path : null,
       op.purge === true ? 1 : 0,
       typeof op.base_hash === "string" ? op.base_hash : null,
+      typeof op.content_ref === "string" ? op.content_ref : null,
     );
 }
 
@@ -220,7 +256,17 @@ const isValidOp = (op: any): boolean =>
   typeof op.kind === "string" &&
   Number.isFinite(op.base_rev) &&
   Number.isFinite(op.new_rev) &&
-  contentLength(op) <= MAX_OP_CONTENT_BYTES;
+  contentLength(op) <= MAX_OP_CONTENT_BYTES &&
+  (op.content_ref === undefined ||
+    op.content_ref === null ||
+    (typeof op.content_ref === "string" && KEY_PART_RE.test(op.content_ref) && !op.content));
+
+/** An op naming content in R2 is accepted only once that content is there. */
+async function contentStored(env: Env, vaultId: string, op: any): Promise<boolean> {
+  if (typeof op.content_ref !== "string") return true;
+  if (!KEY_PART_RE.test(op.note_id)) return false;
+  return (await env.BUCKET.head(noteKey(vaultId, op.note_id, op.content_ref))) !== null;
+}
 
 /** Pull cursor: `s:<seq>`; a bare number is a legacy server-time cursor (ms). */
 function parseCursor(since: string): { seq: number } | { ts: number } {
@@ -234,7 +280,7 @@ export default {
   /** Daily cron (wrangler.jsonc `triggers`): empty the cloud trash. */
   async scheduled(_event: ScheduledController, env: Env): Promise<void> {
     await ensureSchema(env.DB);
-    const erased = await purgeExpiredTrash(env.DB, Math.floor(Date.now() / 1000));
+    const erased = await purgeExpiredTrash(env, Math.floor(Date.now() / 1000));
     console.log(`papelera: ${erased} ops de notas caducadas vaciadas`);
   },
 
@@ -254,11 +300,13 @@ export default {
 
     await ensureSchema(env.DB);
 
-    // 3. Cloudflare D1: Sincronización de adjuntos binarios (/sync/blob/:hash)
+    // 3. Adjuntos (/sync/blob/:hash): el archivo va a R2 y D1 guarda la fila
+    // que lo anuncia en /sync/pull.
     if (url.pathname.startsWith("/sync/blob/")) {
       const hash = url.pathname.replace("/sync/blob/", "").trim();
       const vaultId = parseVaultId(url.searchParams.get("vault_id"));
       if (!vaultId) return invalidVault();
+      if (!KEY_PART_RE.test(hash)) return jsonError(400, "Hash de adjunto inválido");
 
       if (request.method === "POST" || request.method === "PUT") {
         const rawPath = url.searchParams.get("path") || `attachments/${hash}`;
@@ -267,23 +315,29 @@ export default {
         }
 
         const body = await request.arrayBuffer();
-        if (body.byteLength > MAX_D1_BLOB_BYTES) {
+        if (body.byteLength > MAX_BLOB_BYTES) {
           return new Response(
             JSON.stringify({
-              error: "Adjunto supera el límite de 900 KB por fila de Cloudflare D1",
-              max_bytes: MAX_D1_BLOB_BYTES,
+              error: "El adjunto supera el límite de 15 MB",
+              max_bytes: MAX_BLOB_BYTES,
             }),
             { status: 413, headers: { "Content-Type": "application/json" } },
           );
         }
 
-        // A re-upload of the same blob is ignored, so it is not announced again.
+        // Stored before the row that announces it, so no device is told about a
+        // file it cannot download. A re-upload of the same blob is ignored, so
+        // it is not announced again, unless it had been deleted.
+        await env.BUCKET.put(attachmentKey(vaultId, hash), body);
         const now = Date.now();
         await env.DB.prepare(
-          `INSERT OR IGNORE INTO blobs (vault_id, hash, path, size, data, ts, seq)
-           VALUES (?, ?, ?, ?, ?, ?, ${NEXT_SEQ})`,
+          `INSERT INTO blobs (vault_id, hash, path, size, data, ts, seq)
+           VALUES (?, ?, ?, ?, ?, ?, ${NEXT_SEQ})
+           ON CONFLICT (vault_id, hash, path) DO UPDATE
+             SET deleted = 0, size = excluded.size, ts = excluded.ts, seq = excluded.seq
+             WHERE deleted = 1`,
         )
-          .bind(vaultId, hash, rawPath, body.byteLength, new Uint8Array(body), now)
+          .bind(vaultId, hash, rawPath, body.byteLength, new Uint8Array(0), now)
           .run();
 
         return new Response(
@@ -295,9 +349,38 @@ export default {
         );
       }
 
+      // A device deleted the attachment: drop the file (unless another path
+      // still uses the same bytes) and announce the delete to the others.
+      if (request.method === "DELETE") {
+        const path = url.searchParams.get("path") ?? "";
+        if (!isSafeAttachmentPath(path)) return jsonError(400, "Ruta de adjunto inválida");
+        await env.DB.prepare(
+          `UPDATE blobs SET deleted = 1, data = ?, ts = ?, seq = ${NEXT_SEQ}
+           WHERE vault_id = ? AND hash = ? AND path = ? AND deleted = 0`,
+        )
+          .bind(new Uint8Array(0), Date.now(), vaultId, hash, path)
+          .run();
+        const live = await env.DB.prepare(
+          `SELECT 1 AS x FROM blobs WHERE vault_id = ? AND hash = ? AND deleted = 0 LIMIT 1`,
+        )
+          .bind(vaultId, hash)
+          .first();
+        if (!live) await env.BUCKET.delete(attachmentKey(vaultId, hash));
+        return new Response(JSON.stringify({ status: "deleted" }), {
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+
       if (request.method === "GET") {
+        const obj = await env.BUCKET.get(attachmentKey(vaultId, hash));
+        if (obj) {
+          return new Response(obj.body, {
+            headers: { "Content-Type": "application/octet-stream" },
+          });
+        }
+        // Blobs uploaded before R2 still live in D1.
         const row = await env.DB.prepare(
-          `SELECT data FROM blobs WHERE vault_id = ? AND hash = ? LIMIT 1`,
+          `SELECT data FROM blobs WHERE vault_id = ? AND hash = ? AND length(data) > 0 LIMIT 1`,
         )
           .bind(vaultId, hash)
           .first<{ data: ArrayBuffer | number[] }>();
@@ -317,6 +400,40 @@ export default {
       }
     }
 
+    // 3b. Contenido de notas grandes (/sync/content/:note_id/:hash), en R2. Se
+    // sube antes de la op que lo nombra en `content_ref`.
+    if (url.pathname.startsWith("/sync/content/")) {
+      const [noteId, hash, extra] = url.pathname.slice("/sync/content/".length).split("/");
+      const vaultId = parseVaultId(url.searchParams.get("vault_id"));
+      if (!vaultId) return invalidVault();
+      if (extra !== undefined || !KEY_PART_RE.test(noteId ?? "") || !KEY_PART_RE.test(hash ?? "")) {
+        return jsonError(400, "Ruta de contenido inválida");
+      }
+      const key = noteKey(vaultId, noteId, hash);
+      if (request.method === "PUT" || request.method === "POST") {
+        const body = await request.arrayBuffer();
+        if (body.byteLength > MAX_NOTE_BYTES) {
+          return new Response(
+            JSON.stringify({
+              error: "La nota supera el límite de 5 MB",
+              max_bytes: MAX_NOTE_BYTES,
+            }),
+            { status: 413, headers: { "Content-Type": "application/json" } },
+          );
+        }
+        await env.BUCKET.put(key, body);
+        return new Response(JSON.stringify({ status: "stored" }), {
+          status: 201,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      if (request.method === "GET") {
+        const obj = await env.BUCKET.get(key);
+        if (!obj) return new Response("Contenido no encontrado", { status: 404 });
+        return new Response(obj.body, { headers: { "Content-Type": "application/octet-stream" } });
+      }
+    }
+
     // 4. POST /sync/push: recepción y persistencia de mutaciones en SQLite D1
     if (url.pathname === "/sync/push" && request.method === "POST") {
       const body = await request.json<{ vault_id?: string; device_id: string; ops: any[] }>();
@@ -332,8 +449,11 @@ export default {
       const BATCH_SIZE = 50;
       for (let i = 0; i < ops.length; i += BATCH_SIZE) {
         const chunk = ops.slice(i, i + BATCH_SIZE);
-        const valid = chunk.filter(isValidOp);
-        for (const op of chunk) if (!isValidOp(op)) rejected.push(String(op?.op_id ?? ""));
+        const stored = await Promise.all(
+          chunk.map(async (op) => isValidOp(op) && (await contentStored(env, vaultId, op))),
+        );
+        const valid = chunk.filter((_, k) => stored[k]);
+        chunk.forEach((op, k) => stored[k] || rejected.push(String(op?.op_id ?? "")));
         try {
           await env.DB.batch(valid.flatMap((op) => opStatements(env.DB, vaultId, op, serverTs)));
           accepted.push(...valid.map((op) => op.op_id));
@@ -348,6 +468,14 @@ export default {
               rejected.push(op.op_id);
             }
           }
+        }
+      }
+
+      // A permanent delete also drops the note's contents from R2.
+      const done = new Set(accepted);
+      for (const op of ops) {
+        if (op?.purge === true && done.has(op.op_id) && KEY_PART_RE.test(op.note_id)) {
+          await deletePrefix(env.BUCKET, `note/${vaultId}/${op.note_id}/`);
         }
       }
 
@@ -376,7 +504,7 @@ export default {
       const from = "seq" in since ? since.seq : since.ts;
 
       const { results: opRows } = await env.DB.prepare(
-        `SELECT op_id, device_id, note_id, kind, base_rev, new_rev, content, hlc_ts, hlc_cnt, ts, path, purge, base_hash, seq
+        `SELECT op_id, device_id, note_id, kind, base_rev, new_rev, content, hlc_ts, hlc_cnt, ts, path, purge, base_hash, content_ref, seq
          FROM journal
          WHERE vault_id = ? AND ${where}
          ORDER BY seq ASC
@@ -386,7 +514,7 @@ export default {
         .all();
 
       const { results: blobRows } = await env.DB.prepare(
-        `SELECT hash, path, size, ts, seq
+        `SELECT hash, path, size, ts, seq, deleted
          FROM blobs
          WHERE vault_id = ? AND ${where}
          ORDER BY seq ASC
@@ -409,12 +537,14 @@ export default {
         ...(row.path ? { path: row.path } : {}),
         ...(row.purge ? { purge: true } : {}),
         ...(row.base_hash ? { base_hash: row.base_hash } : {}),
+        ...(row.content_ref ? { content_ref: row.content_ref } : {}),
       }));
       const blobs = (blobRows as any[]).map((b) => ({
         hash: b.hash,
         path: b.path,
         size: b.size,
         ts: b.ts,
+        ...(b.deleted ? { deleted: true } : {}),
       }));
 
       // Every row has its own seq, so the cursor is the last seq delivered. A

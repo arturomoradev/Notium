@@ -11,7 +11,10 @@ use tauri::{AppHandle, Emitter};
 
 use notium_core::extract::EditorKind;
 use notium_core::sync::{self, ApplyOutcome, Op};
-pub use notium_core::sync::{is_safe_attachment_rel_path, normalize_vault_id, MAX_D1_BLOB_BYTES};
+pub use notium_core::sync::{
+    is_safe_attachment_rel_path, normalize_vault_id, INLINE_CONTENT_MAX, MAX_BLOB_BYTES,
+    MAX_NOTE_BYTES,
+};
 use notium_core::vault;
 
 use crate::error::CommandError;
@@ -121,6 +124,9 @@ pub struct BlobRef {
     pub size: Option<u64>,
     #[serde(default)]
     pub ts: Option<u64>,
+    /// Deleted on another device: delete it here too.
+    #[serde(default)]
+    pub deleted: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
@@ -250,6 +256,57 @@ impl SyncClient {
         req.send_bytes(data)
             .map_err(|e| format_ureq_error("POST /sync/blob", e))?;
         Ok(())
+    }
+
+    /// Delete an attachment on the server (it tells the other devices).
+    pub fn delete_blob(&self, hash: &str, path: &str) -> Result<(), String> {
+        let url = format!(
+            "{}/sync/blob/{}?vault_id={}&path={}",
+            self.server_url,
+            urlencoding::encode(hash),
+            urlencoding::encode(&self.vault_id),
+            urlencoding::encode(path)
+        );
+        self.apply_auth(self.agent.delete(&url))
+            .call()
+            .map_err(|e| format_ureq_error("DELETE /sync/blob", e))?;
+        Ok(())
+    }
+
+    /// Upload a note content too big to travel inline (see `Op::content_ref`).
+    pub fn push_content(&self, note_id: &str, hash: &str, data: &[u8]) -> Result<(), String> {
+        let req = self.agent.put(&self.content_url(note_id, hash));
+        self.apply_auth(req)
+            .set("Content-Type", "application/octet-stream")
+            .send_bytes(data)
+            .map_err(|e| format_ureq_error("PUT /sync/content", e))?;
+        Ok(())
+    }
+
+    /// Download a note content named by `Op::content_ref`; `None` once purged (404).
+    pub fn pull_content(&self, note_id: &str, hash: &str) -> Result<Option<Vec<u8>>, String> {
+        let req = self.apply_auth(self.agent.get(&self.content_url(note_id, hash)));
+        let res = match req.call() {
+            Ok(res) => res,
+            Err(ureq::Error::Status(404, _)) => return Ok(None),
+            Err(e) => return Err(format_ureq_error("GET /sync/content", e)),
+        };
+        let mut bytes = Vec::new();
+        use std::io::Read;
+        res.into_reader()
+            .read_to_end(&mut bytes)
+            .map_err(|e| format!("Error leyendo el contenido de la nota: {e}"))?;
+        Ok(Some(bytes))
+    }
+
+    fn content_url(&self, note_id: &str, hash: &str) -> String {
+        format!(
+            "{}/sync/content/{}/{}?vault_id={}",
+            self.server_url,
+            urlencoding::encode(note_id),
+            urlencoding::encode(hash),
+            urlencoding::encode(&self.vault_id)
+        )
     }
 
     /// Download a blob; `None` when the server no longer has it (404).
@@ -1137,10 +1194,17 @@ pub fn run_sync_cycle(
         journal_folder_changes(h, &config.device_id)?;
         h.sync.get_unpushed_ops().map_err(sql_err)
     })?;
-    const CHUNK_SIZE: usize = 50;
     let mut push_error = None;
     let mut rejected = 0usize;
-    for chunk in unpushed.chunks(CHUNK_SIZE) {
+    let mut too_big = 0usize;
+    let batches = match push_batches(&client, unpushed, &mut too_big) {
+        Ok(b) => b,
+        Err(e) => {
+            push_error = Some(e);
+            Vec::new()
+        }
+    };
+    for chunk in &batches {
         let push_res = match client.push(chunk) {
             Ok(res) => res,
             Err(e) => {
@@ -1171,14 +1235,24 @@ pub fn run_sync_cycle(
     let mut any_local_change = false;
     let mut server_hashes = std::collections::HashSet::new();
     for _ in 0..MAX_PULL_PAGES {
-        let page = client.pull(cursor.as_deref()).map_err(CommandError::Io)?;
+        let mut page = client.pull(cursor.as_deref()).map_err(CommandError::Io)?;
+        // Contents too big for the op are fetched first; a failed download keeps
+        // the cursor here, so the page is read again next cycle.
+        if !fetch_contents(&client, &mut page.ops) {
+            break;
+        }
         let (pulled, conflicts, changed) = with_vault(shared, root, |h| {
             apply_pulled_ops(h, &page.ops, &config.device_id)
         })?;
         report.ops_pulled += pulled;
         report.conflicts += conflicts;
         any_local_change |= changed;
-        server_hashes.extend(page.blobs.iter().map(|b| b.hash.clone()));
+        server_hashes.extend(
+            page.blobs
+                .iter()
+                .filter(|b| !b.deleted)
+                .map(|b| b.hash.clone()),
+        );
 
         // 3a. Download the page's missing or updated blobs. One that failed to
         // download (not one the server no longer has) keeps the cursor here,
@@ -1203,33 +1277,71 @@ pub fn run_sync_cycle(
         }
     }
 
-    // 3b. Upload local attachments if within D1 900 KB limit and not yet in synced_blobs
+    // 3b. Attachments deleted here since they synced (in the app or by hand):
+    // delete them on the server, which tells the other devices. A missing
+    // attachments folder is not taken as "delete everything".
+    let gone = with_vault(shared, root, |h| {
+        if !h.vault.root.join(vault::ATTACHMENTS).is_dir() {
+            return Ok(Vec::new());
+        }
+        let synced = h.sync.synced_blobs().map_err(sql_err)?;
+        Ok(synced
+            .into_iter()
+            .filter(|(_, path)| !h.vault.exists(path))
+            .collect::<Vec<_>>())
+    })?;
+    for (hash, path) in &gone {
+        if client.delete_blob(hash, path).is_ok() {
+            with_vault(shared, root, |h| {
+                h.sync.unmark_blob_synced(hash, path).map_err(sql_err)
+            })?;
+        }
+    }
+
+    // 3c. Upload local attachments (up to 15 MB) not yet in synced_blobs. Images
+    // the app has not compressed yet wait for it (`attachments_to_compress`).
     let to_upload = with_vault(shared, root, |h| {
         let mut out = Vec::new();
-        if let Ok(local_atts) = h.vault.scan_attachments() {
-            for att in local_atts {
-                if (att.bytes.len() as u64) > MAX_D1_BLOB_BYTES {
-                    continue;
-                }
-                if h.sync
-                    .is_blob_synced(&att.hash, &att.rel_path)
-                    .unwrap_or(false)
-                {
-                    continue;
-                }
-                if server_hashes.contains(&att.hash) {
-                    let _ = h.sync.mark_blob_synced(&att.hash, &att.rel_path);
-                    continue;
-                }
-                out.push(att);
+        for meta in h.vault.scan_attachment_meta().unwrap_or_default() {
+            if meta.size > MAX_BLOB_BYTES {
+                continue;
             }
+            let Ok(att) = h.vault.read_attachment_entry(meta.rel_path) else {
+                continue;
+            };
+            if h.sync
+                .is_blob_synced(&att.hash, &att.rel_path)
+                .unwrap_or(false)
+            {
+                continue;
+            }
+            if server_hashes.contains(&att.hash) {
+                let _ = h.sync.mark_blob_synced(&att.hash, &att.rel_path);
+                continue;
+            }
+            if is_compressible_image(&att.rel_path)
+                && !h.sync.is_image_checked(&att.hash).unwrap_or(false)
+            {
+                continue;
+            }
+            out.push((att.rel_path, att.hash));
         }
         Ok(out)
     })?;
-    for att in &to_upload {
-        if client
-            .push_blob(&att.hash, &att.rel_path, &att.bytes)
-            .is_ok()
+    for (path, hash) in &to_upload {
+        let Ok(bytes) = with_vault(shared, root, |h| Ok(h.vault.read(path)?)) else {
+            continue;
+        };
+        let att = vault::AttachmentEntry {
+            rel_path: path.clone(),
+            size: bytes.len() as u64,
+            hash: hash.clone(),
+            bytes,
+        };
+        if notium_core::hash::content_hash(&att.bytes) == att.hash
+            && client
+                .push_blob(&att.hash, &att.rel_path, &att.bytes)
+                .is_ok()
         {
             with_vault(shared, root, |h| {
                 let _ = h.sync.mark_blob_synced(&att.hash, &att.rel_path);
@@ -1251,12 +1363,95 @@ pub fn run_sync_cycle(
     if let Some(e) = push_error {
         return Err(CommandError::Io(e));
     }
+    if too_big > 0 {
+        return Err(CommandError::Io(format!(
+            "{too_big} cambios no se sincronizan: la nota supera 5 MB"
+        )));
+    }
     if rejected > 0 {
         return Err(CommandError::Io(format!(
-            "El servidor rechazó {rejected} cambios (¿nota demasiado grande?); siguen pendientes"
+            "El servidor rechazó {rejected} cambios; siguen pendientes"
         )));
     }
     Ok(report)
+}
+
+/// Ops per push request, and inline content bytes per request: JSON inflates
+/// content about 3.5×, and the Worker must hold the whole request in memory.
+const PUSH_CHUNK_OPS: usize = 50;
+const PUSH_CHUNK_BYTES: usize = 4_000_000;
+
+/// Group unpushed ops into push requests, uploading contents over
+/// `INLINE_CONTENT_MAX` first (the op then names them in `content_ref`). A note
+/// over `MAX_NOTE_BYTES` stays pending, and so do its later ops: they build on it.
+fn push_batches(
+    client: &SyncClient,
+    unpushed: Vec<Op>,
+    too_big: &mut usize,
+) -> Result<Vec<Vec<Op>>, String> {
+    let mut batches: Vec<Vec<Op>> = Vec::new();
+    let mut bytes = 0usize;
+    let mut held = std::collections::HashSet::new();
+    for mut op in unpushed {
+        if held.contains(&op.note_id) {
+            continue;
+        }
+        let len = op.content.as_ref().map_or(0, Vec::len);
+        if len > MAX_NOTE_BYTES {
+            *too_big += 1;
+            held.insert(op.note_id.clone());
+            continue;
+        }
+        if len > INLINE_CONTENT_MAX {
+            let content = op.content.take().unwrap_or_default();
+            let hash = notium_core::hash::content_hash(&content);
+            client.push_content(&op.note_id, &hash, &content)?;
+            op.content_ref = Some(hash);
+        }
+        let inline = op.content.as_ref().map_or(0, Vec::len);
+        let full = batches.last().is_none_or(|b| {
+            b.len() >= PUSH_CHUNK_OPS || (!b.is_empty() && bytes + inline > PUSH_CHUNK_BYTES)
+        });
+        if full {
+            batches.push(Vec::new());
+            bytes = 0;
+        }
+        bytes += inline;
+        batches.last_mut().expect("just pushed").push(op);
+    }
+    Ok(batches)
+}
+
+/// Fill in the contents that pulled ops name by `content_ref`. Returns false
+/// when a download failed (retry the page later). Ops whose content the server
+/// no longer has (the note was purged) or that came back corrupt are dropped.
+fn fetch_contents(client: &SyncClient, ops: &mut Vec<Op>) -> bool {
+    for op in ops.iter_mut() {
+        let Some(hash) = op.content_ref.clone().filter(|_| op.content.is_none()) else {
+            continue;
+        };
+        match client.pull_content(&op.note_id, &hash) {
+            Ok(Some(bytes)) if notium_core::hash::content_hash(&bytes) == hash => {
+                op.content = Some(bytes);
+                op.content_ref = None;
+            }
+            Ok(_) => log::warn!("sync: content of op {} is gone or corrupt", op.op_id),
+            Err(e) => {
+                log::warn!("sync: content download failed: {e}");
+                return false;
+            }
+        }
+    }
+    ops.retain(|op| op.content_ref.is_none());
+    true
+}
+
+/// Attachment images the app re-encodes before upload (WebView can decode them).
+pub(crate) fn is_compressible_image(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    [".jpg", ".jpeg", ".png", ".webp"]
+        .iter()
+        .any(|ext| lower.ends_with(ext))
 }
 
 /// Download the blobs of a pull page that are missing or changed here.
@@ -1267,10 +1462,23 @@ fn download_blobs(
     client: &SyncClient,
     blobs: &[BlobRef],
 ) -> Result<(usize, bool), CommandError> {
+    let mut removed = 0usize;
     let to_download: Vec<BlobRef> = with_vault(shared, root, |h| {
         let mut out = Vec::new();
         for blob in blobs {
             if !is_safe_attachment_rel_path(&blob.path) {
+                continue;
+            }
+            if blob.deleted {
+                // Only the deleted version: a different file now at that path stays.
+                let same = h
+                    .vault
+                    .read(&blob.path)
+                    .is_ok_and(|b| notium_core::hash::content_hash(&b) == blob.hash);
+                if same && h.vault.remove_file(&blob.path).is_ok() {
+                    removed += 1;
+                }
+                let _ = h.sync.unmark_blob_synced(&blob.hash, &blob.path);
                 continue;
             }
             if h.sync
@@ -1293,12 +1501,12 @@ fn download_blobs(
         Ok(out)
     })?;
 
-    let mut written = 0usize;
+    let mut written = removed;
     let mut failed = false;
     for blob in &to_download {
         match client.pull_blob(&blob.hash) {
             Ok(Some(bytes)) => {
-                if (bytes.len() as u64) <= MAX_D1_BLOB_BYTES
+                if (bytes.len() as u64) <= MAX_BLOB_BYTES
                     && notium_core::hash::content_hash(&bytes) == blob.hash
                 {
                     let ok = with_vault(shared, root, |h| {
@@ -1647,6 +1855,7 @@ mod tests {
             path: path.map(str::to_string),
             purge: false,
             base_hash: None,
+            content_ref: None,
         }
     }
 
@@ -2235,6 +2444,7 @@ mod tests {
                         path: None,
                         purge: false,
                         base_hash: None,
+                        content_ref: None,
                     };
                     let pull_resp = PullResponse {
                         cursor: Some("cur_2".into()),

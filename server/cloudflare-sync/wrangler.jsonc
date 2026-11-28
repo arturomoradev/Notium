@@ -14,4 +14,6 @@
       "database_id": "<your-d1-database-id>",
     },
   ],
+  // Attachments (att/<vault>/<hash>) and notes too big for D1 (note/<vault>/<note>/<hash>).
+  "r2_buckets": [{ "binding": "BUCKET", "bucket_name": "notium-attachments" }],
 }

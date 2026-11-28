@@ -14,6 +14,8 @@ CREATE TABLE IF NOT EXISTS journal (
   path TEXT,
   purge INTEGER NOT NULL DEFAULT 0,
   base_hash TEXT,
+  -- Hash of the content stored in R2 (notes too big for a D1 value).
+  content_ref TEXT,
   -- Arrival order shared with blobs: the /sync/pull cursor.
   seq INTEGER,
   PRIMARY KEY (vault_id, op_id)
@@ -24,9 +26,12 @@ CREATE TABLE IF NOT EXISTS blobs (
   hash TEXT NOT NULL,
   path TEXT NOT NULL,
   size INTEGER NOT NULL DEFAULT 0,
+  -- Empty since R2: the file lives at att/<vault_id>/<hash> in the bucket.
   data BLOB NOT NULL,
   ts INTEGER NOT NULL,
   seq INTEGER,
+  -- Deleted on a device: kept (with a new seq) so the others delete it too.
+  deleted INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (vault_id, hash, path)
 );
 

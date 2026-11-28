@@ -57,6 +57,9 @@ export interface Commands {
   attachment_list: { args: void; result: AttachmentItemDto[] };
   attachment_delete: { args: { path: string }; result: void };
   attachment_delete_orphans: { args: void; result: number };
+  // Images to compress (lib/compressImage.ts); the replacement goes raw via `attachment_replace`.
+  attachments_to_compress: { args: void; result: string[] };
+  attachment_mark_checked: { args: { path: string }; result: void };
   // Notes
   note_list: { args: { tag?: string | null; format?: string | null }; result: NoteSummaryDto[] };
   note_create: {

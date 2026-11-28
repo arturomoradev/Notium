@@ -1,12 +1,12 @@
-// Attachments on the web: stored as blobs in D1 (`/sync/blob/:hash`), keyed by
+// Attachments on the web: stored in R2 via the Worker (`/sync/blob/:hash`), keyed by
 // the same BLAKE3 hash the devices check before downloading (sync.rs).
 import type { AttachmentItemDto } from "../../lib/ipc/types.ts";
 import { contentHash } from "../core.ts";
 import { infoOf, type WebNote } from "./state.ts";
 import { api, persist, vault, vaultQuery } from "./sync.ts";
 
-/** Worker limit per D1 row (server/cloudflare-sync/src/index.ts). */
-const MAX_BLOB_BYTES = 900_000;
+/** Worker limit per attachment (server/cloudflare-sync/src/index.ts). */
+const MAX_BLOB_BYTES = 15_000_000;
 
 /** Same naming as the native `vault_import_attachment`: `<stem>-<uuid>.<ext>`. */
 export function attachmentPath(filename: string): string {
@@ -28,7 +28,7 @@ export async function importAttachment(
 ): Promise<string> {
   if (bytes.byteLength > MAX_BLOB_BYTES) {
     throw new Error(
-      `El adjunto ocupa ${Math.round(bytes.byteLength / 1000)} KB; el máximo en la nube es 900 KB.`,
+      `El adjunto ocupa ${(bytes.byteLength / 1e6).toFixed(1)} MB; el máximo en la nube es 15 MB.`,
     );
   }
   const path = attachmentPath(filename);

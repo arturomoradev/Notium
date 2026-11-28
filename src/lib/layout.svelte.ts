@@ -12,6 +12,29 @@
  */
 export const COMPACT_MAX_WIDTH = 767;
 
+export type ResizablePanel = "sidebar" | "panel";
+
+/** Docked side panel widths (desktop layout): default and drag limits, px. */
+const PANEL_DEFAULT = 280;
+const PANEL_MIN = 200;
+const PANEL_MAX = 600;
+const WIDTHS_KEY = "notium-panel-widths";
+
+function loadWidths(): Record<ResizablePanel, number> {
+  const out = { sidebar: PANEL_DEFAULT, panel: PANEL_DEFAULT };
+  try {
+    const saved = JSON.parse(localStorage.getItem(WIDTHS_KEY) ?? "{}");
+    for (const k of ["sidebar", "panel"] as const) {
+      if (Number.isFinite(saved[k])) out[k] = clampWidth(saved[k]);
+    }
+  } catch {
+    // No storage (private mode) or bad JSON: defaults.
+  }
+  return out;
+}
+
+const clampWidth = (w: number): number => Math.round(Math.min(PANEL_MAX, Math.max(PANEL_MIN, w)));
+
 function detectMobilePlatform(): boolean {
   if (typeof window === "undefined") return false;
   // Dev-only override so the phone/tablet UI can be previewed in a desktop browser.
@@ -22,6 +45,10 @@ function detectMobilePlatform(): boolean {
 class LayoutStore {
   readonly mobilePlatform = detectMobilePlatform();
   narrow = $state(false);
+  /** Widths of the docked sidebar and inspector panel; compact layouts ignore them. */
+  panelWidths = $state(
+    typeof window === "undefined" ? { sidebar: PANEL_DEFAULT, panel: PANEL_DEFAULT } : loadWidths(),
+  );
 
   constructor() {
     if (typeof window === "undefined") return;
@@ -36,6 +63,19 @@ class LayoutStore {
 
   get compact(): boolean {
     return this.mobilePlatform || this.narrow;
+  }
+
+  /** Set a panel's width (clamped); `null` restores the default. */
+  setPanelWidth(panel: ResizablePanel, width: number | null): void {
+    this.panelWidths[panel] = width === null ? PANEL_DEFAULT : clampWidth(width);
+  }
+
+  savePanelWidths(): void {
+    try {
+      localStorage.setItem(WIDTHS_KEY, JSON.stringify(this.panelWidths));
+    } catch {
+      // Not persisted; the width still applies until the app closes.
+    }
   }
 }
 

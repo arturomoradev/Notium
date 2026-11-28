@@ -1,6 +1,7 @@
 <script lang="ts">
   import { call } from "../../lib/ipc/commands";
   import Icon from "../editors/Icon.svelte";
+  import ResizeHandle from "../ResizeHandle.svelte";
   import {
     buildTree,
     collectFolderPaths,
@@ -445,6 +446,7 @@
 />
 
 <aside class="sidebar" class:open={sidebarOpen}>
+  {#if isDesktop}<ResizeHandle panel="sidebar" />{/if}
   {#if isDesktop}
     <div class="desktop-sidebar-top">
       <div class="desktop-tab-strip">

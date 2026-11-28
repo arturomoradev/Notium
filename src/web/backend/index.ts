@@ -113,6 +113,9 @@ const handlers: Handlers = {
     return result;
   },
   attachment_list: () => listAttachments(liveNotes(), titleOf),
+  // Web uploads are compressed on import; there is no folder to copy files into.
+  attachments_to_compress: () => [],
+  attachment_mark_checked: () => undefined,
   trash_list: listTrash,
   trash_restore: ({ trashId }) => restoreTrash(trashId),
   trash_delete_item: ({ trashId }) => deleteTrashItem(trashId),
