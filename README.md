@@ -1,6 +1,9 @@
-# Notium
+<h1 align="center">
+  <img src="notium-icon.svg" alt="" width="48" align="center">
+  Notium
+</h1>
 
-**English** | [Español](README.es.md)
+<p align="center"><strong>English</strong> | <a href="README.es.md">Español</a></p>
 
 Local-first Markdown note app — **Phase 1 complete** (production monorepo, Obsidian-style Markdown editor with live preview, formatting toolbar, watcher, Android).
 
