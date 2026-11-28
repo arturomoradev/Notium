@@ -25,7 +25,8 @@ export interface EditorEngine {
 
 export interface EditorHandle {
   getContent(): string;
-  getPlainText(): string;
+  /** Words and characters (Tiptap CharacterCount). */
+  getStats(): { words: number; chars: number };
   focus(): void;
   blur(): void;
   getEngine(): FormattingEngine | undefined;

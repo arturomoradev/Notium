@@ -14,7 +14,10 @@ the editor is worth it (see the fork exception in `AGENTS.md`).
   embeds, attachments and chunks for search and backlinks.
 - LaTeX (`@tiptap/extension-mathematics` + KaTeX) and Mermaid diagrams
   (`mermaid` code blocks, loaded on demand). `$…$` / `$$…$$` text from old notes
-  becomes math nodes on open (`mathMigration.ts`).
+  becomes math nodes on open (`noteMigration.ts`).
+- Callouts are a `callout` node (type, title, fold) and code blocks are highlighted
+  (lowlight) with a language label and a copy button; `> [!type]` quotes from old
+  notes become callouts on open.
 - Desktop, Android and web backends save and read the doc; demo notes and the
   dev mock are JSON (`src/lib/demoNotes.json`).
 
@@ -32,7 +35,6 @@ the editor is worth it (see the fork exception in `AGENTS.md`).
 
 ## Editor gaps (vs. the CodeMirror editor on `main`)
 
-- [ ] Callouts render as plain blockquotes; give them their own node.
 - [ ] LaTeX and diagram sources are edited with `window.prompt` (math) and the
       raw code block (Mermaid); an inline editor would be nicer, especially on Android.
 - [ ] Note embeds (`![[Nota]]`) show a chip, not the embedded content.

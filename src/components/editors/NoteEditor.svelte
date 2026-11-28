@@ -42,7 +42,7 @@
     engine = mountEditor(host, { onChange, onLinkActivate, title, onRenameTitle }, "live");
     registeredHandle = {
       getContent: () => engine?.getContent() ?? "",
-      getPlainText: () => engine?.getPlainText() ?? "",
+      getStats: () => engine?.getStats() ?? { words: 0, chars: 0 },
       focus: () => engine?.focus(),
       blur: () => engine?.blur(),
       getEngine: () => engine,

@@ -85,6 +85,7 @@ impl State<'_> {
             "table" => "table",
             "paragraph" => "paragraph",
             "blockMath" => "math",
+            "callout" => "callout",
             "horizontalRule" => return,
             _ => "block",
         };
@@ -159,6 +160,15 @@ impl State<'_> {
                 scan.push('\n');
             }
             _ => {
+                // A callout's title is part of its text (searchable, may hold tags/links).
+                if let Some(title) = attr(node, "title").and_then(Value::as_str) {
+                    if node_type(node) == "callout" && !title.is_empty() {
+                        text.push_str(title);
+                        text.push('\n');
+                        scan.push_str(title);
+                        scan.push('\n');
+                    }
+                }
                 let kids = children(node);
                 let inline = kids.first().is_some_and(|k| {
                     matches!(
@@ -235,5 +245,17 @@ mod tests {
         assert!(doc.tags.is_empty());
         let kinds: Vec<&str> = doc.chunks.iter().map(|c| c.kind.as_str()).collect();
         assert_eq!(kinds, ["paragraph", "math"]);
+    }
+
+    #[test]
+    fn callout_title_and_body_are_indexed() {
+        let file = r##"{"doc":{"type":"doc","content":[
+            {"type":"callout","attrs":{"type":"tip","title":"Ver [[Plan]]","fold":""},
+             "content":[{"type":"paragraph","content":[{"type":"text","text":"con #idea"}]}]}]}}"##;
+        let doc = extract(EditorKind::Tiptap, "n", file.as_bytes()).unwrap();
+        assert_eq!(doc.chunks[0].kind, "callout");
+        assert_eq!(doc.chunks[0].body, "Ver [[Plan]]\ncon #idea");
+        assert_eq!(doc.tags, ["idea"]);
+        assert_eq!(doc.out_links[0].target, "Plan");
     }
 }

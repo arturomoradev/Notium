@@ -1151,375 +1151,209 @@
         ]
       },
       {
-        "type": "blockquote",
+        "type": "callout",
+        "attrs": {
+          "type": "note",
+          "title": "Callout de Nota ([!note])",
+          "fold": ""
+        },
         "content": [
           {
             "type": "paragraph",
             "content": [
               {
                 "type": "text",
-                "text": "[!note] Callout de Nota ("
-              },
-              {
-                "type": "text",
-                "text": "[!note]",
-                "marks": [
-                  {
-                    "type": "code"
-                  }
-                ]
-              },
-              {
-                "type": "text",
-                "text": ")\nIdeal para apuntes generales, aclaraciones o contexto adicional dentro de un documento."
+                "text": "Ideal para apuntes generales, aclaraciones o contexto adicional dentro de un documento."
               }
             ]
           }
         ]
       },
       {
-        "type": "blockquote",
+        "type": "callout",
+        "attrs": {
+          "type": "info",
+          "title": "Callout de Información ([!info])",
+          "fold": ""
+        },
         "content": [
           {
             "type": "paragraph",
             "content": [
               {
                 "type": "text",
-                "text": "[!info] Callout de Información ("
-              },
-              {
-                "type": "text",
-                "text": "[!info]",
-                "marks": [
-                  {
-                    "type": "code"
-                  }
-                ]
-              },
-              {
-                "type": "text",
-                "text": ")\nÚtil para destacar datos objetivos, referencias o estado del documento."
+                "text": "Útil para destacar datos objetivos, referencias o estado del documento."
               }
             ]
           }
         ]
       },
       {
-        "type": "blockquote",
+        "type": "callout",
+        "attrs": {
+          "type": "tip",
+          "title": "Callout de Consejo / Sugerencia ([!tip] o [!hint])",
+          "fold": ""
+        },
         "content": [
           {
             "type": "paragraph",
             "content": [
               {
                 "type": "text",
-                "text": "[!tip] Callout de Consejo / Sugerencia ("
-              },
-              {
-                "type": "text",
-                "text": "[!tip]",
-                "marks": [
-                  {
-                    "type": "code"
-                  }
-                ]
-              },
-              {
-                "type": "text",
-                "text": " o "
-              },
-              {
-                "type": "text",
-                "text": "[!hint]",
-                "marks": [
-                  {
-                    "type": "code"
-                  }
-                ]
-              },
-              {
-                "type": "text",
-                "text": ")\nÚsalo para atajos, buenas prácticas o trucos que ahorran tiempo."
+                "text": "Úsalo para atajos, buenas prácticas o trucos que ahorran tiempo."
               }
             ]
           }
         ]
       },
       {
-        "type": "blockquote",
+        "type": "callout",
+        "attrs": {
+          "type": "important",
+          "title": "Callout Importante ([!important])",
+          "fold": ""
+        },
         "content": [
           {
             "type": "paragraph",
             "content": [
               {
                 "type": "text",
-                "text": "[!important] Callout Importante ("
-              },
-              {
-                "type": "text",
-                "text": "[!important]",
-                "marks": [
-                  {
-                    "type": "code"
-                  }
-                ]
-              },
-              {
-                "type": "text",
-                "text": ")\nDestaca requisitos esenciales o puntos clave que no deben pasarse por alto."
+                "text": "Destaca requisitos esenciales o puntos clave que no deben pasarse por alto."
               }
             ]
           }
         ]
       },
       {
-        "type": "blockquote",
+        "type": "callout",
+        "attrs": {
+          "type": "success",
+          "title": "Callout de Éxito / Verificado ([!success] o [!check])",
+          "fold": ""
+        },
         "content": [
           {
             "type": "paragraph",
             "content": [
               {
                 "type": "text",
-                "text": "[!success] Callout de Éxito / Verificado ("
-              },
-              {
-                "type": "text",
-                "text": "[!success]",
-                "marks": [
-                  {
-                    "type": "code"
-                  }
-                ]
-              },
-              {
-                "type": "text",
-                "text": " o "
-              },
-              {
-                "type": "text",
-                "text": "[!check]",
-                "marks": [
-                  {
-                    "type": "code"
-                  }
-                ]
-              },
-              {
-                "type": "text",
-                "text": ")\nConfirma que un procedimiento, prueba o validación se completó correctamente."
+                "text": "Confirma que un procedimiento, prueba o validación se completó correctamente."
               }
             ]
           }
         ]
       },
       {
-        "type": "blockquote",
+        "type": "callout",
+        "attrs": {
+          "type": "warning",
+          "title": "Callout de Advertencia ([!warning] o [!caution])",
+          "fold": ""
+        },
         "content": [
           {
             "type": "paragraph",
             "content": [
               {
                 "type": "text",
-                "text": "[!warning] Callout de Advertencia ("
-              },
-              {
-                "type": "text",
-                "text": "[!warning]",
-                "marks": [
-                  {
-                    "type": "code"
-                  }
-                ]
-              },
-              {
-                "type": "text",
-                "text": " o "
-              },
-              {
-                "type": "text",
-                "text": "[!caution]",
-                "marks": [
-                  {
-                    "type": "code"
-                  }
-                ]
-              },
-              {
-                "type": "text",
-                "text": ")\nAdvierte sobre posibles precauciones o cambios delicados."
+                "text": "Advierte sobre posibles precauciones o cambios delicados."
               }
             ]
           }
         ]
       },
       {
-        "type": "blockquote",
+        "type": "callout",
+        "attrs": {
+          "type": "danger",
+          "title": "Callout de Peligro / Error ([!danger], [!error] o [!bug])",
+          "fold": ""
+        },
         "content": [
           {
             "type": "paragraph",
             "content": [
               {
                 "type": "text",
-                "text": "[!danger] Callout de Peligro / Error ("
-              },
-              {
-                "type": "text",
-                "text": "[!danger]",
-                "marks": [
-                  {
-                    "type": "code"
-                  }
-                ]
-              },
-              {
-                "type": "text",
-                "text": ", "
-              },
-              {
-                "type": "text",
-                "text": "[!error]",
-                "marks": [
-                  {
-                    "type": "code"
-                  }
-                ]
-              },
-              {
-                "type": "text",
-                "text": " o "
-              },
-              {
-                "type": "text",
-                "text": "[!bug]",
-                "marks": [
-                  {
-                    "type": "code"
-                  }
-                ]
-              },
-              {
-                "type": "text",
-                "text": ")\nSeñala acciones críticas, errores conocidos o riesgos de pérdida de datos."
+                "text": "Señala acciones críticas, errores conocidos o riesgos de pérdida de datos."
               }
             ]
           }
         ]
       },
       {
-        "type": "blockquote",
+        "type": "callout",
+        "attrs": {
+          "type": "question",
+          "title": "Callout de Pregunta / FAQ ([!question] o [!faq])",
+          "fold": ""
+        },
         "content": [
           {
             "type": "paragraph",
             "content": [
               {
                 "type": "text",
-                "text": "[!question] Callout de Pregunta / FAQ ("
-              },
-              {
-                "type": "text",
-                "text": "[!question]",
-                "marks": [
-                  {
-                    "type": "code"
-                  }
-                ]
-              },
-              {
-                "type": "text",
-                "text": " o "
-              },
-              {
-                "type": "text",
-                "text": "[!faq]",
-                "marks": [
-                  {
-                    "type": "code"
-                  }
-                ]
-              },
-              {
-                "type": "text",
-                "text": ")\nPerfecto para plantear dudas abiertas o preguntas frecuentes."
+                "text": "Perfecto para plantear dudas abiertas o preguntas frecuentes."
               }
             ]
           }
         ]
       },
       {
-        "type": "blockquote",
+        "type": "callout",
+        "attrs": {
+          "type": "example",
+          "title": "Callout de Ejemplo ([!example])",
+          "fold": ""
+        },
         "content": [
           {
             "type": "paragraph",
             "content": [
               {
                 "type": "text",
-                "text": "[!example] Callout de Ejemplo ("
-              },
-              {
-                "type": "text",
-                "text": "[!example]",
-                "marks": [
-                  {
-                    "type": "code"
-                  }
-                ]
-              },
-              {
-                "type": "text",
-                "text": ")\nMuestra casos prácticos o demostraciones paso a paso."
+                "text": "Muestra casos prácticos o demostraciones paso a paso."
               }
             ]
           }
         ]
       },
       {
-        "type": "blockquote",
+        "type": "callout",
+        "attrs": {
+          "type": "quote",
+          "title": "Callout de Cita ([!quote])",
+          "fold": ""
+        },
         "content": [
           {
             "type": "paragraph",
             "content": [
               {
                 "type": "text",
-                "text": "[!quote] Callout de Cita ("
-              },
-              {
-                "type": "text",
-                "text": "[!quote]",
-                "marks": [
-                  {
-                    "type": "code"
-                  }
-                ]
-              },
-              {
-                "type": "text",
-                "text": ")\nResalta citas textuales de libros, artículos o autores."
+                "text": "Resalta citas textuales de libros, artículos o autores."
               }
             ]
           }
         ]
       },
       {
-        "type": "blockquote",
+        "type": "callout",
+        "attrs": {
+          "type": "note",
+          "title": "Callout Plegable ([!note]-)",
+          "fold": "-"
+        },
         "content": [
           {
             "type": "paragraph",
             "content": [
               {
                 "type": "text",
-                "text": "[!note]- Callout Plegable ("
-              },
-              {
-                "type": "text",
-                "text": "[!note]-",
-                "marks": [
-                  {
-                    "type": "code"
-                  }
-                ]
-              },
-              {
-                "type": "text",
-                "text": ")\nAñadiendo un signo "
+                "text": "Añadiendo un signo "
               },
               {
                 "type": "text",
@@ -2363,14 +2197,19 @@
         ]
       },
       {
-        "type": "blockquote",
+        "type": "callout",
+        "attrs": {
+          "type": "info",
+          "title": "Referencia cruzada",
+          "fold": ""
+        },
         "content": [
           {
             "type": "paragraph",
             "content": [
               {
                 "type": "text",
-                "text": "[!info] Referencia cruzada\nPuedes contrastar este marco teórico con "
+                "text": "Puedes contrastar este marco teórico con "
               },
               {
                 "type": "wikiLink",

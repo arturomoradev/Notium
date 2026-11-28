@@ -1388,6 +1388,99 @@ textarea,
 .tt-wiki-embed .cm-vault-image {
   display: block;
 }
+/* Callouts (Tiptap node view; colours and title come from the .cm-callout rules). */
+.tt-content .tt-callout {
+  cursor: auto;
+  margin: 0.4em 0;
+}
+.tt-content .tt-callout.is-collapsed > .cm-callout-body {
+  display: none;
+}
+.tt-content .tt-callout .cm-callout-title-text {
+  cursor: text;
+}
+.tt-content .tt-callout .cm-callout-fold {
+  cursor: pointer;
+}
+.tt-content .tt-callout > .cm-callout-body > :first-child {
+  margin-top: 0;
+}
+.tt-callout-type {
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  color: var(--muted);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 400;
+  cursor: pointer;
+}
+.tt-callout-type:hover {
+  border-color: var(--border);
+}
+.tt-content[contenteditable="false"] .tt-callout-type {
+  display: none;
+}
+
+/* Code blocks: header with language and copy button, highlight.js token colours. */
+.tt-content .tt-code {
+  cursor: auto;
+  margin: 0.4em 0;
+  padding: 6px 0 0;
+}
+.tt-content .tt-code-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 10px 0 14px;
+}
+.tt-content .tt-code-head .cm-block-badge {
+  margin: 0;
+}
+.tt-content .tt-code pre {
+  margin: 0;
+  background: transparent;
+}
+.tt-content .hljs-keyword,
+.tt-content .hljs-built_in,
+.tt-content .hljs-literal {
+  color: var(--syn-keyword);
+}
+.tt-content .hljs-string,
+.tt-content .hljs-regexp {
+  color: var(--syn-string);
+}
+.tt-content .hljs-number {
+  color: var(--syn-number);
+}
+.tt-content .hljs-comment {
+  color: var(--syn-comment);
+  font-style: italic;
+}
+.tt-content .hljs-title,
+.tt-content .hljs-title.function_ {
+  color: var(--syn-function);
+}
+.tt-content .hljs-type,
+.tt-content .hljs-title.class_ {
+  color: var(--syn-type);
+}
+.tt-content .hljs-attr,
+.tt-content .hljs-property,
+.tt-content .hljs-variable,
+.tt-content .hljs-params {
+  color: var(--syn-property);
+}
+.tt-content .hljs-tag,
+.tt-content .hljs-name,
+.tt-content .hljs-meta,
+.tt-content .hljs-selector-tag {
+  color: var(--syn-tag);
+}
+.tt-content .hljs-punctuation,
+.tt-content .hljs-operator {
+  color: var(--syn-punct);
+}
 .tt-content .tt-mermaid > pre {
   display: none;
   margin-top: 8px;

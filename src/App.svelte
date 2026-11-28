@@ -16,7 +16,7 @@
   import TreeActionModal from "./components/navigation/TreeActionModal.svelte";
   import RightInspectorPanel from "./components/panels/RightInspectorPanel.svelte";
   import type { EditorHandle } from "./components/editors/engine";
-  import { countWords, docOf, statsOf, type Stats } from "./lib/plainText";
+  import { docOf, type Stats } from "./lib/plainText";
   import { updateViewport } from "./lib/mobile/viewport";
   import { DEMO_GUIDE_TITLE, ensureDemoNotes } from "./lib/demoNotes";
   import { settingsStore } from "./lib/stores/settings.svelte";
@@ -287,8 +287,7 @@
   }
 
   function refreshStats(): void {
-    const text = currentEditor()?.getPlainText() ?? "";
-    stats = { words: countWords(text), chars: text.length };
+    stats = currentEditor()?.getStats() ?? { words: 0, chars: 0 };
   }
 
   function handleLink(target: string): void {
@@ -468,7 +467,7 @@
       status = "Listo";
       error = "";
       editorStore.viewMode = "edit";
-      stats = statsOf(note.content);
+      setTimeout(refreshStats); // once the editor has loaded the note
       if (!isDesktop) {
         sidebarOpen = false;
         panelOpen = false;
@@ -520,7 +519,7 @@
             activePath = note.note.path;
             rev = note.rev;
             loadNonce += 1;
-            stats = statsOf(note.content);
+            setTimeout(refreshStats); // once the editor has loaded the note
           }
         }
       } catch {

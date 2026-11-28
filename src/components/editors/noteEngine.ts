@@ -1,5 +1,8 @@
 // Tiptap engine for Notium notes: WYSIWYG editing, the Tiptap doc (JSON) on disk.
-import { Editor, nodeInputRule } from "@tiptap/core";
+import { Editor, Extension, nodeInputRule } from "@tiptap/core";
+import { PluginKey } from "@tiptap/pm/state";
+import Suggestion, { exitSuggestion, type SuggestionProps } from "@tiptap/suggestion";
+import { CharacterCount } from "@tiptap/extensions";
 import type { EditorEngine, EditorEngineCallbacks } from "./engine";
 import type { FormattingEngine } from "./toolbar";
 import { scheduleCaretReveal, updateViewport } from "../../lib/mobile/viewport";
@@ -12,12 +15,12 @@ import {
   normalizeHeading,
   type WikiCompletionEntry,
 } from "./widgets/caches";
-import { WikiLink, noteExtensions } from "./tiptapExtensions";
-import CodeBlock from "@tiptap/extension-code-block";
+import { CALLOUT_META, Callout, WikiLink, lowlight, noteExtensions } from "./tiptapExtensions";
+import CodeBlockLowlight from "@tiptap/extension-code-block-lowlight";
 import Mathematics from "@tiptap/extension-mathematics";
 import type { Node as PMNode } from "@tiptap/pm/model";
 import "katex/dist/katex.min.css";
-import { migrateMath } from "./mathMigration";
+import { migrateNote } from "./noteMigration";
 
 type Mermaid = typeof import("mermaid").default;
 let mermaidModule: Promise<Mermaid> | undefined;
@@ -50,7 +53,7 @@ export interface NoteEngine extends EditorEngine, FormattingEngine {
   setMode(mode: EditorViewMode): void;
   getMode(): EditorViewMode;
   blur(): void;
-  getPlainText(): string;
+  getStats(): { words: number; chars: number };
   insertAttachment(path: string, mime: string): void;
   scrollToHeading(heading: string): boolean;
 }
@@ -132,7 +135,7 @@ export function mountEditor(
   });
 
   // `mermaid` code blocks show the diagram; the source appears while the caret is inside.
-  const MermaidCodeBlock = CodeBlock.extend({
+  const MermaidCodeBlock = CodeBlockLowlight.extend({
     addNodeView() {
       return ({ node: initial, getPos, editor: ed }) => {
         let node = initial;
@@ -141,7 +144,45 @@ export function mountEditor(
         const code = document.createElement("code");
         pre.appendChild(code);
         if (node.attrs.language) code.className = `language-${node.attrs.language}`;
-        if (!isMermaid(node)) return { dom: pre, contentDOM: code };
+        if (!isMermaid(node)) {
+          // Language label + copy button, as on main; lowlight colours the code.
+          const dom = document.createElement("div");
+          dom.className = "cm-codeblock-widget tt-code";
+          const head = document.createElement("div");
+          head.className = "tt-code-head";
+          head.contentEditable = "false";
+          const lang = document.createElement("span");
+          lang.className = "cm-block-badge";
+          lang.textContent = node.attrs.language || "Código";
+          const copy = document.createElement("button");
+          copy.type = "button";
+          copy.className = "cm-callout-edit";
+          copy.textContent = "Copiar";
+          copy.addEventListener("mousedown", (e) => e.preventDefault());
+          copy.addEventListener("click", () => {
+            void navigator.clipboard
+              ?.writeText(node.textContent)
+              .then(() => {
+                copy.textContent = "Copiado";
+                setTimeout(() => (copy.textContent = "Copiar"), 1200);
+              })
+              .catch(() => {});
+          });
+          head.append(lang, copy);
+          dom.append(head, pre);
+          return {
+            dom,
+            contentDOM: code,
+            update: (next) => {
+              if (next.type !== node.type || next.attrs.language !== node.attrs.language)
+                return false;
+              node = next;
+              return true;
+            },
+            ignoreMutation: (m) => !code.contains(m.target),
+            stopEvent: (e) => head.contains(e.target as Node),
+          };
+        }
 
         const dom = document.createElement("div");
         dom.className = "cm-mermaid-widget tt-mermaid";
@@ -218,13 +259,196 @@ export function mountEditor(
     else c.updateBlockMath({ latex }).run();
   };
 
-  const replaced = new Set(["wikiLink", "codeBlock", "Mathematics"]);
+  // Callout box: icon + title (click to rename), type picker, fold chevron.
+  const CalloutView = Callout.extend({
+    addNodeView() {
+      return ({ node: initial, getPos, editor: ed }) => {
+        let node = initial;
+        let collapsed = node.attrs.fold === "-";
+        const dom = document.createElement("div");
+        const head = document.createElement("div");
+        head.contentEditable = "false";
+        const icon = document.createElement("span");
+        icon.className = "cm-callout-icon";
+        const title = document.createElement("span");
+        title.className = "cm-callout-title-text";
+        const picker = document.createElement("select");
+        picker.className = "tt-callout-type";
+        picker.setAttribute("aria-label", "Tipo de callout");
+        for (const [value, meta] of Object.entries(CALLOUT_META))
+          picker.add(new Option(`${meta.icon} ${meta.label}`, value));
+        const chevron = document.createElement("span");
+        chevron.className = "cm-callout-fold";
+        head.append(icon, title, picker, chevron);
+        const body = document.createElement("div");
+        body.className = "cm-callout-body";
+        dom.append(head, body);
+
+        const paint = () => {
+          const type = String(node.attrs.type).toLowerCase();
+          const meta = CALLOUT_META[type] ?? { icon: "📝", label: type, kind: "note" };
+          const fold = Boolean(node.attrs.fold);
+          dom.className = `cm-callout cm-callout-${meta.kind} tt-callout${collapsed ? " is-collapsed" : ""}`;
+          head.className = `cm-callout-title${fold ? " is-foldable" : ""}`;
+          icon.textContent = meta.icon;
+          title.textContent = String(node.attrs.title) || meta.label;
+          picker.value = type in CALLOUT_META ? type : "note";
+          chevron.hidden = !fold;
+          chevron.textContent = collapsed ? "▸" : "▾";
+        };
+        const setAttrs = (attrs: Record<string, string>) => {
+          const pos = getPos();
+          if (pos == null || !ed.isEditable) return;
+          ed.view.dispatch(ed.state.tr.setNodeMarkup(pos, undefined, { ...node.attrs, ...attrs }));
+        };
+        picker.addEventListener("change", () => setAttrs({ type: picker.value }));
+        // shortcut: native prompt for the title, like links and formulas.
+        title.addEventListener("click", () => {
+          if (!ed.isEditable) return;
+          const next = window.prompt("Título del callout", String(node.attrs.title));
+          if (next !== null) setAttrs({ title: next.trim() });
+        });
+        chevron.addEventListener("click", () => {
+          collapsed = !collapsed;
+          paint();
+        });
+        paint();
+        return {
+          dom,
+          contentDOM: body,
+          update: (next) => {
+            if (next.type !== node.type) return false;
+            node = next;
+            paint();
+            return true;
+          },
+          stopEvent: (e) => head.contains(e.target as Node),
+          ignoreMutation: (m) => !body.contains(m.target),
+        };
+      };
+    },
+  });
+
+  // `[[` / `![[` note-link menu, on Tiptap's official suggestion utility.
+  const wikiKey = new PluginKey("wikiSuggestion");
+  const WikiSuggestion = Extension.create({
+    name: "wikiSuggestion",
+    addProseMirrorPlugins() {
+      return [
+        Suggestion<WikiCompletionEntry, WikiCompletionEntry>({
+          editor: this.editor,
+          pluginKey: wikiKey,
+          char: "[[",
+          allowSpaces: true, // note titles have spaces
+          allowedPrefixes: null, // after `!` (embeds), `(`, etc.
+          floatingUi: { strategy: "fixed" },
+          allow: ({ editor: ed }) => mode === "live" && ed.isEditable,
+          items: ({ query }) => buildWikiCompletionEntries(query, getContent()),
+          command: ({ editor: ed, range, props: item }) => {
+            const embed =
+              range.from > 0 && ed.state.doc.textBetween(range.from - 1, range.from) === "!";
+            const from = embed ? range.from - 1 : range.from;
+            const prefix = embed ? "![[" : "[[";
+            if (item.keepOpenForSection) {
+              ed.chain()
+                .focus()
+                .insertContentAt({ from, to: range.to }, prefix + item.insertValue)
+                .run();
+              return;
+            }
+            const size = ed.state.doc.content.size;
+            const after = ed.state.doc.textBetween(range.to, Math.min(range.to + 2, size));
+            ed.chain()
+              .focus()
+              .insertContentAt(
+                { from, to: after === "]]" ? range.to + 2 : range.to },
+                { type: "wikiLink", attrs: { target: item.insertValue, embed } },
+              )
+              .run();
+          },
+          render: () => {
+            const menu = document.createElement("div");
+            menu.className = "cm-tooltip cm-tooltip-autocomplete cm-wiki-completion";
+            menu.setAttribute("role", "listbox");
+            let unmount: (() => void) | undefined;
+            let current: SuggestionProps<WikiCompletionEntry, WikiCompletionEntry> | undefined;
+            let index = 0;
+            const paint = () => {
+              if (!current) return;
+              const { items, query, loading } = current;
+              menu.textContent = "";
+              if (!items.length && !loading) {
+                const empty = document.createElement("div");
+                empty.className = "cm-completionEmpty";
+                empty.textContent = query.includes("#")
+                  ? "No hay secciones coincidentes"
+                  : "No hay notas coincidentes";
+                menu.appendChild(empty);
+              }
+              items.forEach((item, i) => {
+                const row = document.createElement("button");
+                row.type = "button";
+                row.className = "cm-completionLabel" + (i === index ? " selected" : "");
+                row.textContent = item.label;
+                row.addEventListener("mousedown", (e) => {
+                  e.preventDefault();
+                  current?.command(item);
+                });
+                menu.appendChild(row);
+              });
+            };
+            return {
+              onStart: (props) => {
+                current = props;
+                index = 0;
+                paint();
+                unmount = props.mount(menu);
+              },
+              onUpdate: (props) => {
+                current = props;
+                index = Math.min(index, Math.max(0, props.items.length - 1));
+                paint();
+              },
+              onKeyDown: ({ event, view }) => {
+                const items = current?.items ?? [];
+                if (event.key === "Escape") {
+                  exitSuggestion(view, wikiKey);
+                  return true;
+                }
+                if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+                  const step = event.key === "ArrowDown" ? 1 : -1;
+                  index = Math.max(0, Math.min(index + step, items.length - 1));
+                  paint();
+                  return true;
+                }
+                if (event.key === "Enter" && items[index]) {
+                  current?.command(items[index]);
+                  return true;
+                }
+                return false;
+              },
+              onExit: () => {
+                unmount?.();
+                current = undefined;
+              },
+            };
+          },
+        }),
+      ];
+    },
+  });
+  const exitWiki = () => exitSuggestion(editor.view, wikiKey);
+
+  const replaced = new Set(["wikiLink", "codeBlock", "callout", "Mathematics"]);
   const editor = new Editor({
     element: mount,
     extensions: [
       ...noteExtensions().filter((e) => !replaced.has(e.name)),
       LiveWikiLink,
-      MermaidCodeBlock,
+      MermaidCodeBlock.configure({ lowlight }),
+      CalloutView,
+      WikiSuggestion,
+      CharacterCount,
       Mathematics.configure({
         katexOptions: { throwOnError: false },
         inlineOptions: { onClick: editLatex("inline") },
@@ -240,150 +464,13 @@ export function mountEditor(
         autocorrect: "on",
         autocapitalize: "sentences",
       },
-      handleKeyDown: (_view, event) => completionKey(event),
     },
     onUpdate: () => {
       if (applyingExternal) return;
       dirty = true;
       cb.onChange();
     },
-    onSelectionUpdate: () => requestAnimationFrame(refreshCompletion),
-    onTransaction: ({ transaction }) => {
-      if (transaction.docChanged) requestAnimationFrame(refreshCompletion);
-    },
   });
-
-  // ---------- `[[` completion (same menu and styles as the CodeMirror one) ----------
-  let menu: HTMLDivElement | undefined;
-  let items: WikiCompletionEntry[] = [];
-  let index = 0;
-  let range = { from: 0, to: 0 };
-  let prefix = "[[";
-  let token = 0;
-
-  function closeCompletion(): void {
-    token++;
-    menu?.remove();
-    menu = undefined;
-    items = [];
-  }
-
-  function textBeforeCaret(): { text: string; start: number } | null {
-    const { $head, empty } = editor.state.selection;
-    if (!empty || !$head.parent.isTextblock) return null;
-    return {
-      text: $head.parent.textBetween(0, $head.parentOffset, "\n", "￼"),
-      start: $head.start(),
-    };
-  }
-
-  function refreshCompletion(): void {
-    if (destroyed || mode !== "live") return closeCompletion();
-    const before = textBeforeCaret();
-    const m = before && /(!?\[\[)([^\]\n]*)$/.exec(before.text);
-    if (!before || !m) return closeCompletion();
-    void showCompletion(m[2], before.start + m.index, editor.state.selection.head, m[1]);
-  }
-
-  async function showCompletion(query: string, from: number, to: number, p: string) {
-    range = { from, to };
-    prefix = p;
-    index = 0;
-    const t = ++token;
-    try {
-      const next = await buildWikiCompletionEntries(query, getContent());
-      if (destroyed || t !== token || mode !== "live") return;
-      items = next;
-      if (!menu) {
-        menu = document.createElement("div");
-        menu.className = "cm-tooltip cm-tooltip-autocomplete cm-wiki-completion";
-        menu.setAttribute("role", "listbox");
-        document.body.appendChild(menu);
-      }
-      menu.textContent = "";
-      if (items.length === 0) {
-        const empty = document.createElement("div");
-        empty.className = "cm-completionEmpty";
-        empty.textContent = query.includes("#")
-          ? "No hay secciones coincidentes"
-          : "No hay notas coincidentes";
-        menu.appendChild(empty);
-      }
-      items.forEach((item, i) => {
-        const row = document.createElement("button");
-        row.type = "button";
-        row.className = "cm-completionLabel" + (i === index ? " selected" : "");
-        row.textContent = item.label;
-        row.addEventListener("mousedown", (e) => {
-          e.preventDefault();
-          applyCompletion(item);
-        });
-        menu!.appendChild(row);
-      });
-      positionCompletion();
-    } catch {
-      closeCompletion();
-    }
-  }
-
-  function positionCompletion(): void {
-    if (!menu) return;
-    let left = scroller.getBoundingClientRect().left + 16;
-    let top = scroller.getBoundingClientRect().top + 48;
-    try {
-      const c = editor.view.coordsAtPos(range.to);
-      left = c.left;
-      top = c.bottom + 4;
-    } catch {
-      /* fall back to the editor's top edge */
-    }
-    menu.style.left = `${Math.max(8, Math.min(left, window.innerWidth - 280))}px`;
-    menu.style.top = `${Math.max(8, Math.min(top, window.innerHeight - 240))}px`;
-  }
-
-  function applyCompletion(item: WikiCompletionEntry): void {
-    if (item.keepOpenForSection) {
-      editor.chain().focus().insertContentAt(range, `${prefix}${item.insertValue}`).run();
-      return;
-    }
-    const after = editor.state.doc.textBetween(
-      range.to,
-      Math.min(range.to + 2, editor.state.doc.content.size),
-    );
-    const to = after === "]]" ? range.to + 2 : range.to;
-    closeCompletion();
-    editor
-      .chain()
-      .focus()
-      .insertContentAt(
-        { from: range.from, to },
-        {
-          type: "wikiLink",
-          attrs: { target: item.insertValue, embed: prefix.startsWith("!") },
-        },
-      )
-      .run();
-  }
-
-  function completionKey(e: KeyboardEvent): boolean {
-    if (!menu) return false;
-    if (e.key === "Escape") {
-      closeCompletion();
-      return true;
-    }
-    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
-      index = Math.max(0, Math.min(index + (e.key === "ArrowDown" ? 1 : -1), items.length - 1));
-      menu
-        .querySelectorAll(".cm-completionLabel")
-        .forEach((row, i) => row.classList.toggle("selected", i === index));
-      return true;
-    }
-    if (e.key === "Enter" && items[index]) {
-      applyCompletion(items[index]);
-      return true;
-    }
-    return false;
-  }
 
   // ---------- mobile keyboard ----------
   const revealCaret = () => editor.commands.scrollIntoView();
@@ -396,7 +483,6 @@ export function mountEditor(
   }
   const onFocus = () => scheduleCaretReveal(revealCaret, 320);
   editor.on("focus", onFocus);
-  scroller.addEventListener("scroll", positionCompletion, { passive: true });
   window.visualViewport?.addEventListener("resize", onVvResize);
   window.visualViewport?.addEventListener("scroll", updateViewport);
 
@@ -484,7 +570,7 @@ export function mountEditor(
       let migrated = false;
       try {
         doc = JSON.parse(text) as object;
-        migrated = migrateMath(doc);
+        migrated = migrateNote(doc);
       } catch {
         // Shown empty; `loaded` is still what a save writes back until the user edits.
       }
@@ -510,11 +596,13 @@ export function mountEditor(
     getContent,
     focus: () => editor.commands.focus(),
     blur: () => editor.commands.blur(),
-    getPlainText: () => editor.getText(),
+    getStats: () => ({
+      words: editor.storage.characterCount.words(),
+      chars: editor.storage.characterCount.characters(),
+    }),
     destroy() {
       destroyed = true;
-      closeCompletion();
-      scroller.removeEventListener("scroll", positionCompletion);
+      exitWiki();
       window.visualViewport?.removeEventListener("resize", onVvResize);
       window.visualViewport?.removeEventListener("scroll", updateViewport);
       editor.destroy();
@@ -523,7 +611,7 @@ export function mountEditor(
     setMode(m: EditorViewMode) {
       // shortcut: "source" shows the same WYSIWYG view; add a raw Markdown pane if it is missed.
       mode = m;
-      if (m !== "live") closeCompletion();
+      if (m !== "live") exitWiki();
       editor.setEditable(m !== "reading");
     },
     getMode: () => mode,

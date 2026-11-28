@@ -38,7 +38,7 @@ test("wiki links keep target and embed through JSON", () => {
 });
 
 test("linkFirstMention links one whole-word mention, outside code", async () => {
-  const { linkFirstMention, plainTextOf } = await import("../src/lib/plainText.ts");
+  const { linkFirstMention } = await import("../src/lib/plainText.ts");
   const p = (...content) => ({ type: "paragraph", content });
   const t = (text, marks) => (marks ? { type: "text", text, marks } : { type: "text", text });
   const doc = JSON.stringify({
@@ -52,12 +52,11 @@ test("linkFirstMention links one whole-word mention, outside code", async () => 
     t(" hoy"),
   ]);
   assert.equal(linkFirstMention(JSON.stringify(out), "Nada"), null);
-  assert.equal(plainTextOf(JSON.stringify(out)), "Destinos y Destino ver Destino hoy");
   assert.doesNotThrow(() => valid(out));
 });
 
 test("math written as text becomes math nodes, code and prices stay text", async () => {
-  const { migrateMath } = await import("../src/components/editors/mathMigration.ts");
+  const { migrateNote: migrateMath } = await import("../src/components/editors/noteMigration.ts");
   const p = (...content) => ({ type: "paragraph", content });
   const t = (text, marks) => (marks ? { type: "text", text, marks } : { type: "text", text });
   const doc = {
@@ -82,4 +81,39 @@ test("math written as text becomes math nodes, code and prices stay text", async
   assert.equal(doc.content[4].content[0].text, "let a = $b$");
   assert.doesNotThrow(() => valid(doc));
   assert.equal(migrateMath(doc), false);
+});
+
+test("quotes starting with [!type] become callouts, merged ones are split", async () => {
+  const { migrateNote } = await import("../src/components/editors/noteMigration.ts");
+  const p = (...content) => ({ type: "paragraph", content });
+  const t = (text, marks) => (marks ? { type: "text", text, marks } : { type: "text", text });
+  const doc = {
+    type: "doc",
+    content: [
+      {
+        type: "blockquote",
+        content: [
+          p(t("Cita normal")),
+          p(t("[!tip] Consejo\ncuerpo del consejo")),
+          p(t("[!warning]- Plegable")),
+          p(t("más texto")),
+        ],
+      },
+      { type: "blockquote", content: [p(t("sin marcador"))] },
+    ],
+  };
+  assert.equal(migrateNote(doc), true);
+  assert.deepEqual(
+    doc.content.map((n) => [n.type, n.attrs?.type, n.attrs?.title, n.attrs?.fold]),
+    [
+      ["blockquote", undefined, undefined, undefined],
+      ["callout", "tip", "Consejo", ""],
+      ["callout", "warning", "Plegable", "-"],
+      ["blockquote", undefined, undefined, undefined],
+    ],
+  );
+  assert.deepEqual(doc.content[1].content, [p(t("cuerpo del consejo"))]);
+  assert.deepEqual(doc.content[2].content, [p(t("más texto"))]);
+  assert.doesNotThrow(() => valid(doc));
+  assert.equal(migrateNote(doc), false);
 });

@@ -201,8 +201,7 @@ export const TOOLBAR_COMMANDS: ToolbarCommand[] = [
     id: "callout",
     title: "Insertar callout",
     icon: "quote",
-    run: (e) =>
-      e.exec((ed) => ed.chain().focus().toggleBlockquote().insertContent("[!note] ").run()),
+    run: (e) => e.exec((ed) => ed.chain().focus().wrapIn("callout", { type: "note" }).run()),
   },
   { id: "codeblock", title: "Bloque de código", icon: "code", run: (e) => e.codeBlock() },
   { id: "hr", title: "Línea horizontal", icon: "minus", run: (e) => e.horizontalRule() },

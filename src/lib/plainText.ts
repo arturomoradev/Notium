@@ -1,34 +1,11 @@
-// Plain-text extraction + word/character counting for the backlinks panel footer.
+// Small helpers over Tiptap docs (JSON) used outside the editor.
 
 interface DocNode {
   type?: string;
   text?: string;
-  attrs?: { target?: string; embed?: boolean; latex?: string };
+  attrs?: { target?: string; embed?: boolean; latex?: string; title?: string };
   marks?: unknown[];
   content?: DocNode[];
-}
-
-/** Text of a Tiptap doc (JSON string): text nodes and link targets, one line per block. */
-export function plainTextOf(content: string): string {
-  let doc: DocNode;
-  try {
-    doc = JSON.parse(content) as DocNode;
-  } catch {
-    return content.trim();
-  }
-  const out: string[] = [];
-  const walk = (n: DocNode): void => {
-    if (n.type === "text") out.push(n.text ?? "");
-    else if (n.type === "wikiLink") out.push(n.attrs?.target ?? "");
-    else if (n.type === "inlineMath") out.push(n.attrs?.latex ?? "");
-    else if (n.type === "blockMath") out.push(n.attrs?.latex ?? "", "\n");
-    else {
-      n.content?.forEach(walk);
-      out.push("\n");
-    }
-  };
-  walk(doc);
-  return out.join("").replace(/\s+/g, " ").trim();
 }
 
 /** A doc (JSON string) whose blocks are `blocks`. */
@@ -73,18 +50,7 @@ export function linkFirstMention(docJson: string, title: string): string | null 
   return done ? JSON.stringify(doc) : null;
 }
 
-export function countWords(text: string): number {
-  const t = text.trim();
-  if (!t) return 0;
-  return t.split(/\s+/).length;
-}
-
 export interface Stats {
   words: number;
   chars: number;
-}
-
-export function statsOf(content: string): Stats {
-  const text = plainTextOf(content);
-  return { words: countWords(text), chars: text.length };
 }
